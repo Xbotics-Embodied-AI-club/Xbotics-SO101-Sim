@@ -1,17 +1,7 @@
 MIT License
 
 Copyright (c) 2026 Xbotics Embodied AI Club
-
-Portions of this project (`so101_sim/tasks/place.py`,
-`so101_sim/tasks/base_random_env.py`, `so101_sim/tasks/black_overlay.png`, and
-`so101_sim/robots/so101_base/`) originate from the squint project:
-
-    Copyright (c) 2026 Abdulaziz Almuzairee
-    https://github.com/aalmuzairee/squint
-    Licensed under the MIT License.
-
-See `so101_sim/tasks/UPSTREAM.md` for the exact upstream commit and the scope of
-our fork.
+Copyright (c) 2026 Abdulaziz Almuzairee (portions, see NOTICE)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

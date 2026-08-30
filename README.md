@@ -110,6 +110,7 @@ pytest
 
 ## 来源与许可
 
-MIT。`tasks/` 与 `robots/so101_base/` 最初取自 [squint](https://github.com/aalmuzairee/squint)（MIT，
-© 2026 Abdulaziz Almuzairee），自 2026-08-23 起分叉自维护 —— 来源与分叉声明见
-[`so101_sim/tasks/UPSTREAM.md`](so101_sim/tasks/UPSTREAM.md)，署名见 [`LICENSE`](LICENSE)。
+MIT（见 [`LICENSE`](LICENSE)）。`tasks/` 与 `robots/so101_base/` 最初取自
+[squint](https://github.com/aalmuzairee/squint)（MIT，© 2026 Abdulaziz Almuzairee），
+自 2026-08-23 起分叉自维护 —— 署名见 [`NOTICE`](NOTICE)，分叉范围见
+[`so101_sim/tasks/UPSTREAM.md`](so101_sim/tasks/UPSTREAM.md)。

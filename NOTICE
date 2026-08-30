@@ -1,0 +1,22 @@
+Xbotics-SO101-Sim
+Copyright (c) 2026 Xbotics Embodied AI Club
+
+This product includes software developed as part of the squint project.
+
+    squint — Fast Visual Reinforcement Learning for Sim-to-Real Manipulation
+    Copyright (c) 2026 Abdulaziz Almuzairee
+    https://github.com/aalmuzairee/squint
+    Licensed under the MIT License.
+
+The following files originate from squint at commit
+2a1f6e894e2a4cfd97a18dbe43b1570dde65fa42 (2026-03-04):
+
+    so101_sim/tasks/place.py
+    so101_sim/tasks/base_random_env.py
+    so101_sim/tasks/black_overlay.png
+    so101_sim/robots/so101_base/          (so101.py, so101.urdf, so101.srdf, meshes/)
+
+They were introduced byte-for-byte unmodified. As of 2026-08-23 these files are
+maintained by this project and no longer track upstream. See
+so101_sim/tasks/UPSTREAM.md for the scope of the fork and what we deliberately
+did not carry over.
