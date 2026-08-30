@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv*/
+scratch/
+# 本包是库不是应用：锁文件会把 torch 之类的解析结果钉死，反过来卡住装它的项目。
+# 各消费方（handbook 的 code/、我们的 lerobot fork）各自锁自己的。
+uv.lock
+

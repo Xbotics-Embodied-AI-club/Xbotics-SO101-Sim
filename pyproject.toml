@@ -1,0 +1,60 @@
+# so101_sim —— SO-101 机械臂的 ManiSkill3 仿真环境。
+#
+# 独立包：不依赖 lerobot 也能用。lerobot 侧的评测入口由我们维护的 fork
+# (Xbotics-Embodied-AI-club/lerobot) 注册，依赖方向是它依赖本包，不是反过来。
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "so101_sim"
+version = "0.1.0"
+description = "SO-101 ManiSkill3 仿真环境：原生批量入口 + lerobot 评测口"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12,<3.13"
+keywords = ["robotics", "simulation", "maniskill", "so-101", "lerobot", "embodied-ai"]
+
+# 运行依赖。torch 不在此处钉 index —— 装在 GPU 机上时由上层项目
+# （或用户自己的 uv / pip index 配置）决定 cu128 / cpu 轮子。
+# 这些是包内真正 import 到的东西，逐个对着 `grep import so101_sim/` 核过。
+# 有几个（sapien / transforms3d / cv2）也会被 mani-skill 带进来，但仍显式声明 ——
+# 依赖靠传递关系成立的话，上游哪天调整 extras 就会变成一个只在别人机器上出现的
+# ImportError。
+dependencies = [
+    "mani-skill==3.0.1",
+    "gymnasium>=1.0",
+    "torch>=2.6",
+    # wrappers.py 的颜色抖动用 torchvision.transforms
+    "torchvision>=0.21",
+    "numpy>=2",
+    # 资产加载：kit_assets/objects 里有 CAD 件
+    "trimesh",
+    # 物理引擎本体（mani-skill 的后端）
+    "sapien>=3.0",
+    # 位姿/四元数换算
+    "transforms3d",
+    # 观测缩放（wrappers 的降采样）
+    "opencv-python",
+    # envs.py 用 dacite 从 dict 构造 dataclass 配置
+    "dacite",
+]
+
+[project.optional-dependencies]
+# 只给开发自检用；跑仿真本身不需要。h5py 是 tools/ 的量测脚本读轨迹用的。
+dev = [
+    "pytest>=8",
+    "h5py",
+]
+
+[project.urls]
+Homepage = "https://github.com/Xbotics-Embodied-AI-club/Xbotics-SO101-Sim"
+Dataset = "https://huggingface.co/datasets/Harrysunshine/so101-sim-pickplace"
+
+# 仿真资产（URDF / 网格 / 贴图）随 packages 一起进 wheel —— hatchling 收整个包目录，
+# 不只收 .py，所以不需要再单独声明一遍；重复声明会让同一路径被写入两次而构建失败。
+[tool.hatch.build.targets.wheel]
+packages = ["so101_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
