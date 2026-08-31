@@ -25,7 +25,7 @@ pip install git+https://github.com/Xbotics-Embodied-AI-club/Xbotics-SO101-Sim.gi
 要跑 lerobot 评测的话装我们维护的 lerobot fork 即可，它会把本包一起带上：
 
 ```bash
-pip install "lerobot[all] @ git+https://github.com/Xbotics-Embodied-AI-club/lerobot.git@xbotics"
+pip install "lerobot[all] @ git+https://github.com/Xbotics-Embodied-AI-club/lerobot.git@main"
 ```
 
 ## 两个入口
