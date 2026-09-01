@@ -73,7 +73,7 @@ lerobot-eval --env.type=so101_sim --env.task=SO101PickPlaceCube40-v1 --eval.n_ep
 
 ```
 so101_sim/
-├── envs.py                 三个分发场景 + 三个 RL 训练孪生（mixin 组合：双相机 / 真机尺寸 / 可达生成 / 速度包线）
+├── envs.py                 三个分发场景，就是全部入口（mixin 组合：双相机 / 真机尺寸 / 可达生成 / 速度包线）
 ├── tasks/                  任务基类与成功判定（place.py + base_random_env.py）
 ├── robots/
 │   ├── so101_kit.py        KIT 版机器人（含底板、型材、两个相机支架）
