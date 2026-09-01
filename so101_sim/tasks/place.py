@@ -543,13 +543,6 @@ class Place(DefaultCameraEnv):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 9
 
 
-@register_env("SO101PlaceCube-v1", max_episode_steps=50)
-class PlaceCube(Place):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, item_type="cube", **kwargs)
-
-
-@register_env("SO101PlaceCan-v1", max_episode_steps=50)
-class PlaceCan(Place):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, item_type="can", **kwargs)
+# 上游 squint 在这里注册过 `SO101PlaceCube-v1` / `SO101PlaceCan-v1` 两个薄壳环境
+# （50 步预算）。**已删**：这个包对外只暴露 envs.py 里那三个场景，入口唯一且确定。
+# 基类 `Place` 保留 —— 那三个场景继承它，删的只是多出来的注册 id。

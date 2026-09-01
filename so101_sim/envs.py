@@ -195,11 +195,29 @@ def _swap_visual_to_mesh(actor, glb_path, target_full_sizes, align="center",
 KIT_WRIST_ROLL_OFFSET = np.pi / 2
 
 
+# ── 起始位姿 = 真机开机位姿（REAL_HOME）─────────────────────────────────────
+#
+# 度制：[-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
+# 这不是挑出来的数，是**真机开机位姿**：与两份真机数据集的首帧中位逐关节吻合
+# （lift -102.7 vs -102.6/-102.0，elbow 93.0 vs 92.6/95.6，gripper 1.9 vs 1.0/1.2），
+# 六个关节量级各不相同，错位或反号会立刻露馅。已发布的 1449 集演示每一集第 0 帧
+# 都精确等于它（逐位标准差 0.000）。
+#
+# ★为什么 reset() 必须落在这里，而不是 vanilla 的 `start` keyframe：
+#   那个 keyframe 给的是 [0.5, -1.4, -0.0, 88.4, -0.8, 59.7]——与本包产出的数据相差
+#   **lift 101° / elbow 93° / gripper 58°**。于是拿这些数据训出来的策略在评测时
+#   从一个它从未见过的位形起步，前半段全在追赶，**成功率是 0，而且不报任何错**，
+#   看起来完全像"策略没学会"。我们自己在这上面栽过一次：同一份权重，
+#   只把起始姿态从 reset 默认换成 REAL_HOME，成功率 0/20 → 9/10。
+#
+#   所以这是个**默认值而非开关**。做成开关会让两种初值同时在用，比现在更难查。
+#   确实要旧行为的，显式覆盖 `self.rest_qpos`。
+REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
+
+
 def kit_rest_qpos():
-    """vanilla `start` keyframe 换算到 KIT 关节约定后的起始位姿。"""
-    q = np.asarray(SO101.keyframes["start"].qpos, float).copy()
-    q[4] += KIT_WRIST_ROLL_OFFSET          # 索引 4 = wrist_roll
-    return q.tolist()
+    """起始位姿（弧度），KIT 关节约定。见上方 REAL_HOME_DEG 的说明。"""
+    return np.radians(REAL_HOME_DEG).tolist()
 
 
 class KitDualCameraMixin:
@@ -921,81 +939,3 @@ class SO101PickPlaceCylinder40(KitSlowMixin, RealSizeItemMixin, ReachableSpawnMi
 
 
 # ══ 以下为历史遗留名，仅为兼容在跑的产线与既有 checkpoint 保留，新代码请用上面三个 ══
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 强化学习训练用环境（`*Train-v1`）
-#
-# 上面三个分发场景的 reward 与步数**保持原样不动**——它们的物理行为被
-# `tests/test_physics_regression.py` 逐位钉住，而且已经产出了交付数据集。
-# 训练需要的两处改动放在这里，作为独立注册的孪生环境：
-#
-# ★为什么必须改：拿一条已交付的成功轨迹真跑物理，逐帧读引擎给的 reward，量到
-#
-#   | 状态 | 单步 reward（归一化） |
-#   |---|---|
-#   | 抓着悬在箱口 | 0.61 |
-#   | 放手仍在箱口 | 0.82 – 1.00 |
-#   | **success**  | **1.00** |
-#
-#   `success` 与"放手仍在箱口"**完全同值**＝成功是零增量，而 success 还额外要求
-#   `is_robot_static`（要停下来）⇒ 达成成功等于放弃 shaping 却换不到任何东西。
-#   600 步预算下整集回报：**悬停 221 vs 成功 4，悬停是成功的 55 倍。**
-#   历史上策略"夹着方块在箱口悬停 331 帧不放手"不是探索失败，是它算对了。
-#
-# ★为什么加步数：参考轨迹（脚本化伺服，逐位可重放）总帧数中位 **368**、最长 **443**，
-#   而分发环境是 400 步 ⇒ 余量仅 8.7%，最长的专家轨迹本身就超预算。
-#   RL 早期必然比专家慢，一慢就撞截断，连一次成功都拿不到，熵探索无从起步。
-#
-# 两处都**只碰 terminal 项与预算**，不动任何 shaping：历史上两次"改 shaping 续训"
-# （v8 与 home 任务）都因为旧的精细夹持技能崩塌得比新目标收敛更快而失败。
-# ══════════════════════════════════════════════════════════════════════════════
-
-TRAIN_HORIZON = 800           # 见下：包线内重计时后专家自己就要 ~612 帧，再留学习期余量
-# 参考集原始长度中位 368 / 最长 443，但那批是用绝对角录的、实际速度达 1.4–1.6× 真机 p95。
-# 把它按逐关节每步增量上限重新计时（只拉长不压缩）后，长度涨 1.35×（p90 1.37 / max 1.38），
-# 即中位 ~496、最长 ~612 帧。
-# 训练预算必须容得下"包线内的专家"，否则连示范都跑不完。
-SUCCESS_BONUS = 60.0          # 成功态每步的加成；60 时成功到底 358 vs 悬停到底 28
-
-
-class TrainRewardMixin:
-    """把成功做成真正值钱的**持续状态**，其余 shaping 一字不改。
-
-    ★关键是"持续"而不是"一次性"。先试过一次性加成功奖励（`+20` 只在成功那一帧给），
-    实测悬停仍然赢：悬停能连拿 358 步 × 0.19，而成功只拿一帧就终止 ⇒ 69 : 2。
-    **一次性奖励在结构上打不过按步计费的奖励流。**
-
-    所以这里做两件事：成功期间**每步**都给加成，且**不因成功而终止**
-    （由训练侧的 `ignore_terminations=True` 保证跑满 horizon）。于是"早点成功并保持成功"
-    严格优于"抓着不放悬停"——按 `SUCCESS_BONUS=60` 算，成功到底 358 vs 悬停到底 28。
-
-    只覆盖 reward 的**结果**，父类的接近/搬运/开合/静止各项照原样生效，
-    所以已经学会的精细夹持不会被打散（历史上两次改 shaping 续训都因此失败）。
-    """
-
-    def compute_dense_reward(self, obs, action, info):
-        reward = super().compute_dense_reward(obs=obs, action=action, info=info)
-        # 成功期间每步都加，不是只在成功那一帧加
-        return reward + SUCCESS_BONUS * info["success"].float()
-
-    def compute_normalized_dense_reward(self, obs, action, info):
-        # 父类按 /9 归一化；成功态上界变成 (9 + SUCCESS_BONUS)，归一化后仍是 1.0，
-        # 而未成功各档被相应压低——这正是我们要的对比度。
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / (9 + SUCCESS_BONUS)
-
-
-@register_env("SO101PickPlaceCube40Train-v1", max_episode_steps=TRAIN_HORIZON)
-class SO101PickPlaceCube40Train(TrainRewardMixin, SO101PickPlaceCube40):
-    """`SO101PickPlaceCube40-v1` 的训练孪生：成功奖励加码 + 步数放到 600。"""
-
-
-@register_env("SO101PickPlaceCube20Train-v1", max_episode_steps=TRAIN_HORIZON)
-class SO101PickPlaceCube20Train(TrainRewardMixin, SO101PickPlaceCube20):
-    """`SO101PickPlaceCube20-v1` 的训练孪生：成功奖励加码 + 步数放到 600。"""
-
-
-@register_env("SO101PickPlaceCylinder40Train-v1", max_episode_steps=TRAIN_HORIZON)
-class SO101PickPlaceCylinder40Train(TrainRewardMixin, SO101PickPlaceCylinder40):
-    """`SO101PickPlaceCylinder40-v1` 的训练孪生：成功奖励加码 + 步数放到 600。"""
