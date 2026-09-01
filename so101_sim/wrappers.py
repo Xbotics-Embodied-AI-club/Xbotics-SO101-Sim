@@ -43,7 +43,15 @@ class DownsampleObsWrapper(gym.ObservationWrapper):
         )
 
     def observation(self, obs):
-        rgb = obs['rgb']  # (B, H, W, C) 或 (H, W, C)
+        """把 `obs['rgb']` 降采样到 `target_size`，其余键原样带过。
+
+        Args:
+            obs: 上游观测字典，`rgb` 形状 (B, H, W, C) 或 (H, W, C)。
+
+        Returns:
+            同一个字典（就地改 `rgb`）。已经是目标尺寸时直接返回，不做无谓的插值。
+        """
+        rgb = obs['rgb']
         if rgb.shape[-2] == self.target_size:
             return obs
 
@@ -68,13 +76,9 @@ class DownsampleObsWrapper(gym.ObservationWrapper):
 class ColorJitterWrapper(gym.ObservationWrapper):
     """对 RGB 观测做随机颜色抖动，增强 sim2real 鲁棒性。
 
-    输入约定为 (B, H, W, C) 格式，通道数 C 必须是 3 的整数倍——每 3 通道对应一路相机
+    输入约定为 (B, H, W, C)，通道数须为 3 的整数倍 —— 每 3 通道对应一路相机
     （`FlattenRGBDObservationWrapper` 把多路相机的 RGB 沿通道维拼接后就是这种排布）。
-    top 和 wrist 是两个物理上独立的相机，各自的成色偏差、曝光噪声互不相关，所以每一路
-    单独抽一次随机抖动参数才是与物理对应的增强；如果两路共用同一次抖动，等于假设两个
-    传感器会同步产生完全相同的色差，这在真实标定里并不成立。因此这里对每一组 3 通道
-    分别调用一次 `self.jitter`（每次调用都会重新采样亮度/对比度/饱和度/色调），而不是
-    采样一次参数后复用。
+    每路独立抖动，因为两个物理相机的成色偏差与曝光噪声互不相关。
     """
 
     def __init__(self, env, brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05):
@@ -82,7 +86,19 @@ class ColorJitterWrapper(gym.ObservationWrapper):
         self.jitter = torchvision.transforms.ColorJitter(brightness, contrast, saturation, hue)
 
     def observation(self, obs):
-        rgb = obs['rgb']  # (B, H, W, C) 或 (H, W, C)，uint8，C 是 3 的整数倍
+        """对每路相机分别做一次颜色抖动。
+
+        Args:
+            obs: 上游观测字典，`rgb` 是 uint8，通道数须为 3 的整数倍（每 3 通道一路相机）。
+
+        Returns:
+            同一个字典（就地改 `rgb`）。
+
+        Raises:
+            ValueError: 通道数不是 3 的整数倍 —— 那说明上游不是按「每路相机 3 通道」拼的，
+                继续抖动会把相邻两路的通道混在一组里。
+        """
+        rgb = obs['rgb']
 
         # ManiSkill 的原生观测有 batch 维、被 `squeeze` 过的没有，两种都要能进。
         squeeze = rgb.dim() == 3

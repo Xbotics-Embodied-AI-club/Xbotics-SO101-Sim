@@ -63,6 +63,8 @@ class KitFalseSelfCollisionMixin:
 
 @register_agent()
 class SO101Kit(KitFalseSelfCollisionMixin, SO101):
+    """真机 KIT 版 SO101：裸臂 SO101 的控制器与 keyframe，换成真机几何。"""
+
     uid = "so101_kit"
 
     # 真机 KIT 几何（含支架与两相机光学系）；随包自包含，见同目录 kit_assets/。

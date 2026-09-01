@@ -68,6 +68,7 @@ def thin_along(mesh, axis, delta):
 
 
 def main():
+    """按命令行给的 δ（毫米）沿开合方向削薄两指碰撞体，写出 `*_erode.obj`。"""
     delta = float(sys.argv[1]) / 1000.0
     axes = open_axis_in_link_frames()
     for link, files in PARTS.items():

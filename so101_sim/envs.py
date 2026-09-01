@@ -172,16 +172,12 @@ def _swap_visual_to_mesh(actor, glb_path, target_full_sizes, align="center",
         entity.add_component(rb)
 
 
-# KIT URDF 的 wrist_roll 零位比 vanilla 高 90°：`KIT = vanilla + 90°`。
-# 沿用 vanilla 的 −90° 会落在 KIT 限位 [−67.21°, 252.79°] 外 22.79°，控制器 target 被
-# 永久钉在界外，腕部滚转出现 22.8° 死区且全程贴限位。证据与实测见 bd xb-1sc2。
-KIT_WRIST_ROLL_OFFSET = np.pi / 2
-
-
-# 起始位姿 = 真机开机位姿（度制）。与两份真机数据集的首帧中位逐关节吻合，
-# 已发布的 1449 集演示每一集第 0 帧都精确等于它（逐位标准差 0.000）。
-# 换成 vanilla 的 `start` keyframe 会让策略从没见过的位形起步：实测同一份权重，
-# 成功率 0/20 → 9/10。所以这是默认值而非开关，证据见 bd xb-1sc2。
+# 起始位姿 = 真机开机位姿（度制，**KIT 关节约定**）。与两份真机数据集的首帧中位逐关节
+# 吻合，已发布的 1449 集演示每一集第 0 帧都精确等于它（逐位标准差 0.000）。
+# 这里不能填 vanilla 的数：KIT 的 wrist_roll 零位比 vanilla 高 90°，vanilla 的 −90° 会落在
+# KIT 限位外 22.79°，控制器 target 被永久钉在界外、腕部滚转出现死区。
+# 也不能换成 vanilla 的 `start` keyframe：策略会从没见过的位形起步，实测同一份权重
+# 成功率 0/20 → 9/10。⇒ 这是默认值而非开关。两条的证据见 bd xb-1sc2。
 REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
 
 
@@ -212,8 +208,17 @@ class KitDualCameraMixin:
     BIN_MESH_ROTATION = None
 
     def __init__(self, *args, robot_uids="so101_kit", domain_randomization_config=None, **kwargs):
-        # 基座朝向与 so101 一致（z 轴不旋转）；起始 qpos 必须做 wrist_roll 零位换算，
-        # 否则 −90° 落在 KIT 限位外，见 `kit_rest_qpos` 上方的说明。
+        """装好 KIT 机器人、真机起始位姿，并把机械臂与支架刷黑。
+
+        Args:
+            *args: 透传给父任务。
+            robot_uids: KIT 版机器人 uid。
+            domain_randomization_config: 父任务的域随机化配置，dict 或带 `.dict()` 的对象；
+                这里只往里补 `robot_color`，不覆盖调用方已给的键。
+            **kwargs: 透传给父任务。
+        """
+        # 基座朝向与 so101 一致（z 轴不旋转）。起始 qpos 必须是**KIT 约定**的值：
+        # vanilla 的 −90° wrist_roll 落在 KIT 限位外，见 `REAL_HOME_DEG` 上方的说明。
         self.base_z_rot = 0
         self.rest_qpos = kit_rest_qpos()
 
@@ -230,12 +235,17 @@ class KitDualCameraMixin:
         super().__init__(*args, robot_uids=robot_uids, domain_randomization_config=config, **kwargs)
 
     def _load_scene(self, options: dict):
-        # 先按任务原逻辑搭好桌子/物体/机器人着色，再把 mani_skill 自带的木桌面刷白。
+        """搭场景，并把外观与几何对齐真机。
+
+        必须在这一步（GPU 烘焙之前）换渲染网格与颜色，之后再换进不了 GPU 渲染。
+
+        Args:
+            options: ManiSkill 传下来的场景选项。
+        """
         super()._load_scene(options)
         _paint_actor(self.table_scene.table, TABLE_COLOR)
 
-        # 把 item / bin 的渲染网格换成真机演示套件的 STEP→mesh（碰撞盒保持不变）。
-        # item_dimensions / bin_dimensions 都是每 env 的半尺寸，×2 得全尺寸喂给缩放。
+        # `item_dimensions` / `bin_dimensions` 是每 env 的**半**尺寸，×2 才是喂给缩放的全尺寸。
         if self.ITEM_MESH is not None:
             item_full = self.item_dimensions.cpu().numpy() * 2
             _swap_visual_to_mesh(self.item, _OBJECTS_DIR / f"{self.ITEM_MESH}_visual.glb",
@@ -249,10 +259,14 @@ class KitDualCameraMixin:
 
     @property
     def _default_sensor_configs(self):
+        """两路相机的配置。宽高与 fov 是标定值，**改宽高比就等于换了一台相机**。
+
+        Returns:
+            `top` 与 `wrist` 两个 `CameraConfig`，各自挂在 KIT URDF 的光学系 link 上。
+        """
         conv = sapien.Pose(q=_OPTICAL_CONV)
-        # top 相机在挂载光学系里额外平移 + 额外俯仰（对齐真机视角用），wrist 不动。
-        # ★俯仰是绕 **y** 轴（实测：在 `_OPTICAL_CONV` 之后右乘绕 y 的旋转，+10° 恰好让
-        # 俯视角 67.5°→77.5°；绕 x 无效果、绕 z 只产生 -2° 的耦合，都不是俯仰轴）。
+        # 额外俯仰绕的是 **y** 轴：实测在 `_OPTICAL_CONV` 之后右乘绕 y 的旋转，+10° 恰好让
+        # 俯视角 67.5°→77.5°；绕 x 无效果，绕 z 只产生 −2° 的耦合，都不是俯仰轴。
         half = np.deg2rad(TOP_CAMERA_EXTRA_PITCH_DEG) / 2
         pitch_q = [np.cos(half), 0.0, np.sin(half), 0.0]
         top_pose = sapien.Pose(p=list(TOP_CAMERA_OFFSET),
@@ -282,34 +296,16 @@ class KitDualCameraMixin:
         ]
 
 
-# ── 真机套件物体的「真实尺寸」抓取任务 ────────────────────────────────────
-#
-# 上面那批 `SO101Kit*Cube-v1` 沿用 squint 默认碰撞尺寸（cube 半边长 2.2–2.8cm 档），
-# 只换了视觉网格 —— 于是 4cm 的 cube_4 会被压缩渲染成 ~2.5cm，画面与真机件不同尺寸。
-# 下面这批把**碰撞盒也钉到 STEP 实测真值**，视觉与物理同尺寸，mesh 缩放恒为 1.0：
-#
-#   cube_4      4.0 × 4.0 × 4.0 cm    #b74e4d
-#   cube_2      2.0 × 2.0 × 2.0 cm    #9cbbd1
-#   cylinder_4  直径 4.0 cm / 高 4.0 cm  #9cbbd1
-#
-# 每个物体注册**一对**任务：
-#   `SO101Lift<Obj>Real-v1`    —— vanilla 外观 + 单 base_camera，给 RL 专家训练用
-#                                （专家的 CNN 编码器是 3 通道，吃不了 KIT 的双相机 6 通道）。
-#   `SO101KitLift<Obj>Real-v1` —— KIT 双相机 + mesh + STEP 颜色，给 replay 重渲数据集用。
-# 两者碰撞尺寸逐字一致，所以 vanilla 里录的 env_states 灌进 KIT 是同一套物理。
-#
+# 三个分发场景的物体：碰撞盒与视觉网格**同尺寸**，都钉到 STEP 实测真值，mesh 缩放恒为 1.0。
 # 尺寸的唯一真相源是 STEP→glb 的包围盒（`mesh_full_size`），不在代码里另抄一份数字。
-
-
-# 真机演示套件的件是**海绵**（物料表：海绵方块 2cm 红 / 4cm 蓝，海绵圆柱 φ4×4cm 蓝），
-# 不是 3D 打印实心件。取 200 kg/m³ ⇒ 4cm 件约 12.8g，与软质泡沫同量级。
 #
-# ★这条曾被改成 1250（按"PLA 实心 80g"），那是把材质臆断成 3D 打印件的结果，是资产错误。
-# 它的连锁后果比数字本身大得多：件一重，指尖托运就撑不住，于是我判定"squint 原生奖励
-# 学不会夹紧"，进而叠了一整套几何夹持奖励与成功门（v9–v14），把原本能到 success 1.00 的
-# 配方压到 0.008。资产回真值后这些补丁全部失去前提，应一并退掉。
-# 另注：200 恰是 squint 默认值 —— 它的奖励尺度/成功阈值都是围绕这个量级调的，用真值等于
-# 回到配方的适用域内。
+#   cube_4      4.0 × 4.0 × 4.0 cm      cube_2  2.0 × 2.0 × 2.0 cm
+#   cylinder_4  直径 4.0 cm / 高 4.0 cm
+
+
+# 真机套件的件是海绵（不是 3D 打印实心件），取 200 kg/m³ ⇒ 4cm 件约 12.8 g。
+# 200 也是 squint 的默认值，它的奖励尺度与成功阈值都围绕这个量级调过 ⇒ 真值落在配方适用域内。
+# 这个数改大会连锁污染整套夹持奖励与成功门，账见 bd xb-jc5o。
 ITEM_DENSITY = 200.0
 
 
@@ -330,17 +326,9 @@ def _cylinder_size_config(mesh_name):
             "item_density_range": (ITEM_DENSITY, ITEM_DENSITY)}
 
 
-# ★撒点区照抄真机分布，不照抄 IK 扫描。
-# 依据：ModelScope cube 任务 174 集，用**夹爪开合**定位关键时刻再正解算末端位置
-# （闭合那刻末端在物体上、张开那刻在料箱上，见 hybrid/infer_real_layout.py）：
-#   物体 x p5..p95 = 0.172..0.368   y = -0.099..0.190
-#   料箱 x         = 0.199..0.387   y = -0.064..0.179
-#   两者水平间距 中位 13.7cm（p5 8.9 / p95 22.0）
-# ⚠️ 我曾用 IK 网格扫描得出"x>=0.325 全不可达、撒点区一半超臂展"，据此把区域收到
-# 10×10cm —— **该结论已作废**：真机确实够到 x=0.368，且我们此前 replay 过真机轨迹并
-# 目检通过，说明这些位姿在仿真里可达。是我给 IK 强加的末端姿态约束太严造成的假阴性。
-# 教训：可达性要用**真机既有轨迹**证伪，不能只信自己写的求解器。
-# 真机 y 明显偏正（中位 +0.042~+0.053），故中心不取 y=0。
+# 撒点区照抄真机实测分布，不照抄 IK 可达性扫描（那条曾给出作废的假阴性，见 bd xb-oy5i）。
+# 依据 ModelScope cube 任务 174 集反解出的末端位置：物体 x p5..p95 = 0.172..0.368、
+# y = -0.099..0.190；真机 y 明显偏正（中位 +0.042~+0.053），故中心不取 y=0。
 SPAWN_BOX_POS = [0.27, 0.045]
 SPAWN_BOX_HALF_SIZE = 0.10
 
@@ -364,6 +352,14 @@ class RealSizeItemMixin:
     ITEM_SIZE_CONFIG = {}
 
     def __init__(self, *args, domain_randomization_config=None, **kwargs):
+        """把 `ITEM_SIZE_CONFIG` 里的尺寸区间补进域随机化配置。
+
+        Args:
+            *args: 透传给父任务。
+            domain_randomization_config: 父任务的配置；只补本类声明的键，
+                调用方已给的不覆盖。
+            **kwargs: 透传给父任务。
+        """
         if domain_randomization_config is None:
             config = {}
         elif isinstance(domain_randomization_config, dict):
@@ -380,58 +376,29 @@ class RealSizeItemMixin:
 _CYLINDER_Y_TO_Z = [np.cos(-np.pi / 4), np.sin(-np.pi / 4), 0.0, 0.0]
 
 
-# ── 真机速度包线版任务（`*Slow-v1`）──────────────────────────────────────
-#
-# 上面那批任务用 squint 默认的 delta 上限（臂 ±0.1 rad/step），20fps 下饱和速度 114.6°/s，
-# 而用户真机 task1 实测 p95 只有 29–66°/s ⇒ 生成的动作快 1.6–3.6×，真机跟不上。
-# 这批把动作空间压进真机包线（逐关节按 `真机 p95 / fps` 反算，见 `robots/so101_kit_slow.py`），
-# 重训专家后生成的轨迹才是"真机能执行的速度下的真解"。
-#
-# 命名 `*Slow-v1`；与上面那批**并存不替换**，便于对照与回退。
-
-
-# ── 「真夹住」的判据：几何贴合，不是接触力 ────────────────────────────
-#
-# ★为什么不能用接触力：SAPIEN/PhysX 的 `contact_offset = 0.02` —— 两体相距 **2cm 以内**
-# 就生成接触约束并报接触力。所以"两指各 16–18N"与"画面里方块离爪明显有缝"可以同真，
-# **任何基于力的判据在这个设定下天然分不清「夹住」和「靠近」**。
-# 实测（用两爪碰撞网格全部顶点到方块盒的最小距离，不经任何代表点）：
-#     gripper_link 中位 −1.58mm / 有缝帧 3.6%
-#     moving_jaw   中位 −1.88mm / **有缝帧 19.8%**
-#     两爪同时贴合的帧仅 **78.5%**
-# 即约 1/5 的帧活动爪根本没碰到方块，靠固定爪一侧顶着 + 摩擦带走 —— 用户目检所见。
-#
-# 于是 reward 与验收都改成几何量：爪面采样点到方块盒的有符号距离 ≤ 0 才算贴合。
-# ★阈值必须给到**负值（真压入）**，不能设 0。设 0 时"gap≤0 即满分"，策略就停在边界上：
-# 实测 v5（TOL=0）在 grasped 窗口里 gap 中位 **0.03mm**、只有 49.3% 的帧 ≤0
-# —— 恰好卡在阈值上来回抖。要求压入 2mm 才给满分，策略才有理由真的收紧。
-FIRM_GRASP_GAP_TOL = -0.002       # 满分阈值（米）：需压入 2mm
-FIRM_GRASP_GAP_SCALE = 0.006      # 从满分阈值再放宽 6mm 处夹持分归零
-# ★光有「压入多深」还不够，必须同时问「压在哪」——见 `_pinch_facts` 的实测：
-# v7 有 84.8% 的搬运帧 gap<=0，却有 96.1% 的帧接触在棱上，真·两侧夹持仅 0.7%。
+# 「真夹住」用**几何贴合**判，不用接触力：PhysX 的 `contact_offset = 0.02` 意味着两体
+# 相距 2 cm 以内就报接触力 ⇒ 力判据天然分不清「夹住」与「靠近」。实测有 19.8% 的帧
+# 活动爪根本没碰到方块，靠固定爪单侧顶着 + 摩擦带走。判据、三条阈值各自的账、
+# 以及「reward 朝理想值优化、门取可达值」这条结论，见 bd xb-4zle。
+FIRM_GRASP_GAP_TOL = -0.002       # reward 满分阈值（米）：需压入 2 mm。设 0 会让策略卡在边界抖
+FIRM_GRASP_GAP_SCALE = 0.006      # 从满分阈值再放宽 6 mm 处夹持分归零
 PINCH_EDGE_MARGIN = 0.70          # 接触点面内归一化位置上限（1.0=贴棱）；超过即不算夹住
-PINCH_EDGE_SCALE = 0.25           # 从上限再放宽多少后中部分归零
-# reward 用的连续量阈值：两爪接触点中点到质心的归一化距离
+# reward 用的连续量：两爪接触点中点到质心的归一化距离
 PINCH_CENTER_GOOD = 0.35          # 到此为止算「夹住质心」，给满分
 PINCH_CENTER_SCALE = 0.55         # 再远这么多后中部分归零
-# ★success 门用的阈值：比 reward 的满分线**宽**。
-# 门设在满分线上会够不着：实测把门设成 `center_off≤0.35 ∧ gap≤-2mm` 后，策略在「已抬起」
-# 帧上只有 **0.2%** 满足，正样本采不到 ⇒ success 从 0.31 塌到 0.008、128 集只剩 1 集。
-# 而 `center_off≤0.50 ∧ gap≤0` 该策略能到 **39.0%**，且仍把擦棱的挡在外面
-# （同判据下只改 reward 的上一版仅 14.1%）。⇒ reward 朝理想值优化，门取可达值。
+# success 门比 reward 的满分线**宽** —— 门设在满分线上会够不着，正样本采不到。
 GATE_CENTER_OFF = 0.50
 GATE_GAP = 0.0
 # 松手瞬间物体的速度上限（m/s）。真机是放到底、停稳再张爪，物体此时基本不动；
-# 取 5cm/s 作为"已经躺住"的判据，横扫中途松手远超此值。
+# 取 5 cm/s 作为「已经躺住」的判据，横扫中途松手远超此值。
 GENTLE_RELEASE_SPEED = 0.05
-# 方块静置在箱底时的绝对高度（米）。实测 v7/v12 数据：落到箱底后 item z 稳定在 2.50cm
-# （桌面上是 2.00cm）。料箱只在 xy 随机、z 不变，所以这个值是常量。
+# 方块静置在箱底时的绝对高度（米）。实测落到箱底后 item z 稳定在 2.50 cm（桌面上是 2.00 cm）。
+# 料箱只在 xy 随机、z 不变，所以这是个常量。
 ITEM_REST_Z_IN_BIN = 0.025
-# 「往箱底放」的引导强度与尺度。★这是 v13 缺的那一环：上一版只把「轻放」写进 success，
-# **没给任何梯度** —— 策略永远撞不到那道墙，自然学不会。同当初「回家」那次的错误。
+# 「往箱底放」的引导。判据加了而引导没加，策略永远撞不到那道墙 —— 所以这几个必须在。
 LOWER_REWARD_SCALE = 2.0
-LOWER_REWARD_K = 20.0        # 高出箱底 5cm 时得 0.24 分、1cm 时 0.80 分、贴底 1.00 分
-RELEASE_HIGH_PENALTY = 2.0   # 高处/带速度松手的惩罚
+LOWER_REWARD_K = 20.0        # 高出箱底 5 cm 得 0.24 分、1 cm 得 0.80 分、贴底 1.00 分
+RELEASE_HIGH_PENALTY = 2.0   # 高处或带速度松手的惩罚
 JAW_LINKS = ("gripper_link", "moving_jaw_so101_v1_link")
 JAW_SAMPLE_STRIDE = 24            # 爪网格顶点抽稀步长（每爪约几百点，够用且够快）
 
@@ -476,18 +443,17 @@ class FirmGraspRewardMixin:
     `物体在料箱 x/y 内 ∧ 已松手 ∧ 物体静止 ∧ 机器人静止` —— **不含 `is_item_grasped`**。
     于是"托着走到箱口再丢进去"完全满足判据，策略没有任何理由把爪子收紧。
 
-    **为什么判据必须是几何而不是力**：PhysX `contact_offset = 0.02` ⇒ 两体相距 2cm 以内
-    就报接触力。实测两指各 16–18N 的同时，用两爪碰撞网格全部顶点量到方块盒的最小距离：
-    `moving_jaw` **有缝帧占 19.8%**、两爪同时贴合仅 **78.5%** —— 约 1/5 的帧活动爪根本
-    没碰到方块。所以力大小完全不能代表"夹住"，此前基于 `min(两指力)/5N` 的夹持项在
-    2cm 内就能拿满分。
+    **为什么判据必须是几何而不是力**：PhysX `contact_offset = 0.02` ⇒ 两体相距 2 cm 以内
+    就报接触力，所以力大小完全不能代表「夹住」。实测两指各 16–18 N 的同时，活动爪
+    有 19.8% 的帧根本没碰到方块。判据的完整账见 bd xb-4zle。
 
-    三处改动（都在子类，不碰 vendored）：
-    1. **几何贴合奖励**：两爪各取碰撞网格采样点，算到方块（有向盒）的有符号距离，
+    三处改动都在子类，不碰 vendored：
+
+    1. 几何贴合奖励：两爪各取碰撞网格采样点，算到方块（有向盒）的有符号距离，
        取两爪中较差那一侧；≤0（压入）给满分，缝 `FIRM_GRASP_GAP_SCALE` 以上归零。
-    2. **搬运分以夹住为前提**：vendored 的 `is_item_above_bin` 分支会**无条件**覆盖 reward
-       （不要求 grasped），这正是"托着走"能拿高分的口子。未曾真贴合过则扣掉该增量。
-    3. `evaluate()` 导出 `jaw_gap` / `is_firm_grasp`，供验收与常驻断言使用（几何量）。
+    2. 搬运分以夹住为前提：vendored 的 `is_item_above_bin` 分支会**无条件**覆盖 reward、
+       不要求 grasped，这正是「托着走」能拿高分的口子。未曾真贴合过则扣掉该增量。
+    3. `evaluate()` 导出 `jaw_gap` / `is_firm_grasp` 供验收与常驻断言使用。
     """
 
     def _jaw_points(self):
@@ -502,15 +468,16 @@ class FirmGraspRewardMixin:
         return self._jaw_pts
 
     def _pinch_facts(self):
-        """两爪最近点的 (较差 gap, 是否落在相对面, 较差面内偏移)。
+        """两爪的贴合事实：不只「压得多深」，还有「压在哪」。
 
-        ★只看 `gap` 会瞎：它取所有采样点有符号距离的**最小值**，`argmin` 把「接触发生在
-        哪儿」整个丢掉 —— 棱上蹭到 1mm 与侧面中部压入 1mm 同分。实测 v7 搬运帧（441 帧）：
-        `gap<=0` 有 **84.8%**，但接触点**面内偏移中位 0.83、贴棱(>0.7)帧占 96.1%**，
-        真·两侧夹持只有 **0.7%** —— 方块靠擦棱 + 摩擦被带走，正是用户目检的「像吸附」。
+        只看 `gap` 会瞎：它取所有采样点有符号距离的最小值，`argmin` 把「接触发生在哪儿」
+        整个丢掉 —— 棱上蹭到 1 mm 与侧面中部压入 1 mm 同分。实测某一版搬运帧里
+        `gap≤0` 占 84.8%，但贴棱（面内偏移 >0.7）的帧占 96.1%，真·两侧夹持只有 0.7%：
+        方块是靠擦棱加摩擦被带走的，目视像吸附。
 
-        所以再取两件事：接触点落在方块哪个面（法向轴 + 符号），以及它在该面内离棱多近
-        （除法向轴外两个归一化坐标的较大者，1.0=贴棱）。
+        Returns:
+            `(较差 gap, 两爪是否落在一对相对面, 较差的面内偏移, 接触中点到质心的归一化距离)`。
+            面内偏移取除法向轴外两个归一化坐标的较大者，1.0 = 贴棱。
         """
         Ti = self.item.pose.to_transformation_matrix()
         Ri, pi = Ti[:, :3, :3], Ti[:, :3, 3]
@@ -548,6 +515,16 @@ class FirmGraspRewardMixin:
         return self._pinch_facts()[0]
 
     def compute_dense_reward(self, obs, action, info):
+        """父类 reward 加三项：几何贴合、往箱底放、以及对高处松手的惩罚。
+
+        Args:
+            obs: 当前观测。
+            action: 刚执行的动作。
+            info: `evaluate()` 的产物；含 `jaw_gap` 等几何量时直接复用，避免重算。
+
+        Returns:
+            每个并行环境一个标量 reward。
+        """
         reward = super().compute_dense_reward(obs, action, info)
 
         if "pinch_center_off" in info:
@@ -557,18 +534,16 @@ class FirmGraspRewardMixin:
             gap, opposite, edge_off, center_off = self._pinch_facts()
         # 贴合分：gap<=tol 满分，线性衰减到 tol+scale 归零
         grip_score = (1.0 - (gap - FIRM_GRASP_GAP_TOL) / FIRM_GRASP_GAP_SCALE).clamp(0.0, 1.0)
-        # ★再乘上「方位」两项，否则策略会去优化棱边接触（v7 就是这么学出来的）：
-        #   中部分 —— 接触点离棱越远越高分；相对面 —— 两爪不在一对相对面上直接归零。
+        # 必须再乘「方位」项，否则策略会去优化棱边接触：接触点离棱越远越高分。
         centrality = (1.0 - (center_off - PINCH_CENTER_GOOD)
                       / PINCH_CENTER_SCALE).clamp(0.0, 1.0)
         grip_score = grip_score * centrality
 
-        # ★这里必须用**可达**的门判据，不能用 `is_true_pinch` 那个又严又抖的量。
-        # 下面 `above_bin_no_firm` 会按 `~_ever_firm` 每步扣 1.5 分，而"举到料箱上方"是
-        # 完成任务的必经环节 —— 判据若几乎不可能为真（strict 版实测仅 0.2% 的帧满足），
-        # 这一项就退化成**对放置动作本身的恒定惩罚**，策略学到的是别把物体举过去。
-        # 该惩罚原本配的是宽判据（gap≤-2mm，可达 4–30%）；我加方位项时收严了 `firm_now`
-        # 却没回头看它的下游用途，v11 成功率只有 0.062 极可能就是这么来的。
+        # 这里必须用**可达**的门判据。下面 `above_bin_no_firm` 会按 `~_ever_firm` 每步扣
+        # 1.5 分，而「举到料箱上方」是完成任务的必经环节 —— 判据若几乎不可能为真
+        # （严格版实测仅 0.2% 的帧满足），这一项就退化成对放置动作本身的恒定惩罚，
+        # 策略学到的是别把物体举过去。收严这个判据而不回头看它的下游用途，
+        # 曾把成功率压到 0.062。见 bd xb-4zle。
         firm_now = (gap <= GATE_GAP) & (center_off <= GATE_CENTER_OFF)
         if getattr(self, "_ever_firm", None) is None or self._ever_firm.shape[0] != firm_now.shape[0]:
             self._ever_firm = torch.zeros_like(firm_now)
@@ -585,12 +560,10 @@ class FirmGraspRewardMixin:
         above_bin_no_firm = info["is_item_above_bin"] & (~self._ever_firm)
         reward = reward - 1.5 * above_bin_no_firm.float()
 
-        # ★放置引导（v14 新增）：夹着物体到了箱上方后，**越把物体往箱底放分越高**。
-        # 真机就是这么做的——放到底、停稳、才张爪，全程不脱手（300 集实测松手前速度
-        # 只有全程中位的 0.11，腕部画面里松手前 20 帧方块已躺在箱底）。
-        # v13 只在 success 里加了「松手时物体近静止」，**没有梯度**，策略无从发现这条路径，
-        # 实测 12/12 条成功轨迹全部在离箱底 3.8–9.2cm 的空中以 0.135–0.540 m/s 甩手，
-        # 分布里连一条接近轻放的都没有 ⇒ 不是采样不足，是没给引导。
+        # 放置引导：夹着物体到了箱上方后，越把物体往箱底放分越高。真机就是这么做的 ——
+        # 放到底、停稳、才张爪，全程不脱手（300 集实测松手前速度只有全程中位的 0.11）。
+        # 只把「轻放」写进 success 而不给梯度是不够的：那一版 12/12 条成功轨迹全部在离箱底
+        # 3.8–9.2 cm 的空中以 0.135–0.540 m/s 甩手 ⇒ 不是采样不足，是没给引导。
         above = info["is_item_above_bin"]
         holding = info["is_item_grasped"]
         height = (self.item.pose.p[:, 2] - ITEM_REST_Z_IN_BIN).clamp(min=0.0)
@@ -605,6 +578,12 @@ class FirmGraspRewardMixin:
         return reward
 
     def _initialize_episode(self, env_idx, options):
+        """开新一集，并清掉「本集曾真夹住」这两个跨集状态。
+
+        Args:
+            env_idx: 本次被 reset 的并行环境下标 —— **只清这些**，别的还在进行中。
+            options: ManiSkill 传下来的初始化选项。
+        """
         super()._initialize_episode(env_idx, options)
         if getattr(self, "_ever_firm", None) is not None:
             self._ever_firm[env_idx] = False
@@ -614,6 +593,13 @@ class FirmGraspRewardMixin:
             self._ever_center_grasp[env_idx] = False
 
     def evaluate(self):
+        """父类的判定，外加几何贴合量与「本集曾真夹住」这个必要条件。
+
+        Returns:
+            父类 info 加上 `jaw_gap` / `pinch_center_off` / `is_pinch_opposite` /
+            `pinch_edge_off` 与收紧后的 `success`。几何量导出来供验收与常驻断言用，
+            也让 `compute_dense_reward` 不必重算一遍。
+        """
         info = super().evaluate()
         gap, opposite, edge_off, center_off = self._pinch_facts()
         info["jaw_gap"] = gap
@@ -715,6 +701,12 @@ class ReturnHomeMixin:
         return torch.linalg.norm(qpos[:, :-1] - self._home_qpos[:, :-1], dim=-1)
 
     def evaluate(self):
+        """父类的判定，外加「回到 home」这一段的量。
+
+        Returns:
+            父类 info 加上 `home_dist` / `is_robot_home` / `placed`。`placed` 保留父类
+            口径（放进去了，不管停在哪），`success` 则要求同时回到 home。
+        """
         info = super().evaluate()
         self._latch_reachable_home()
         home_dist = self._home_distance()
@@ -762,6 +754,15 @@ class SlowRobotMixin:
     SLOW_ROBOT_UID = "so101_slow"
 
     def __init__(self, *args, robot_uids=None, domain_randomization_config=None, **kwargs):
+        """装好真机速度包线版机器人，并按几何选对应的起始位姿。
+
+        Args:
+            *args: 透传给父任务。
+            robot_uids: 忽略，一律用 `SLOW_ROBOT_UID` —— 速度包线是机器人自身的属性，
+                让调用方换 uid 就等于绕过了包线。
+            domain_randomization_config: 父任务的配置；只补摩擦区间等本类声明的键。
+            **kwargs: 透传给父任务。
+        """
         self.base_z_rot = 0
         # 本 mixin 两种机器人都带：`so101_slow`（vanilla 几何）与子类覆盖的 `so101_kit_slow`
         # （KIT 几何）。wrist_roll 零位只在 KIT 那份上差 90°，故按 uid 分支，不能一刀切。
@@ -794,19 +795,15 @@ class SlowRobotMixin:
         return cfg
 
 
-# ── KIT 几何 + 单 base_camera：训练任务 ────────────────────────────────
+# 训练必须直接用 KIT 几何，不能"在 vanilla 训练 + 灌进 KIT 重渲"：两份 URDF 的
+# `wrist_roll` 子系零位恰差 90°（关节轴相同，相对旋转 90.00°；其余关节全为 0.000），
+# 同一个 qpos 在两边把夹爪放到不同位置 —— `gripper_link` 差 6.0 mm、`moving_jaw` 差
+# 38.1/13.7 mm。实测同批轨迹在 vanilla 侧 gap 中位 −1.53 mm / 贴合 94.6%，在 KIT 侧
+# +3.01 mm / 32.1% ⇒ 策略按一套几何学会夹紧，验收按另一套算，永远对不上。
+# 真机几何是固定事实，所以只能让训练迁到 KIT 这一侧。
 #
-# ★为什么必须有这个：vanilla `so101.urdf` 与 KIT `kit_v1_so101.urdf` 的 `wrist_roll`
-# 子系**零位恰差 90°**（关节轴 z 列相同 `[0,1,0]`，相对旋转 90.00°；其余关节 Δxyz/Δrpy
-# 全为 0.000）。同一个 qpos 在两边把夹爪放到不同位置——`gripper_link` 差 6.0mm(z)、
-# `moving_jaw` 差 38.1mm(x)/13.7mm(z)。于是"在 vanilla 训练 + 灌进 KIT 重渲"这条路
-# 根本不自洽：策略按 vanilla 几何学会夹紧，画面与验收却按 KIT 几何算，永远对不上
-# （实测 vanilla 侧 gap 中位 −1.53mm/贴合 94.6%，同批轨迹在 KIT 侧 +3.01mm/32.1%）。
-# 真机几何不能改（用户 2026-07-31 明确），所以**训练必须直接用 KIT 几何**。
-#
-# 唯一障碍：KIT 双相机发 6 通道，而 squint 专家的 CNN 编码器是 3 通道。
-# 解法=训练任务用 **KIT 机器人 + squint 默认的单 base_camera**（不套 KitDualCameraMixin），
-# 双相机只在 replay 重渲时用。这样训练与验收共享同一套几何。
+# 障碍是 KIT 双相机发 6 通道而 squint 专家的 CNN 编码器只吃 3 通道，
+# 所以训练用 KIT 机器人 + squint 默认单相机，双相机只在重渲时用。
 
 
 class KitGeomSingleCamMixin(SlowRobotMixin):
@@ -819,23 +816,15 @@ class KitGeomSingleCamMixin(SlowRobotMixin):
     SLOW_ROBOT_UID = "so101_kit_slow"
 
 
-# SPEED_SCALE 0.6->0.2 后每步位移只剩 1/3，同样动作要约 3 倍步数；上限随之从 400 提到 900。
-# ── 纯 squint 配方 + 真值资产（数据集生产走这条）────────────────────────────
+# 三个分发场景走 squint 原生的 reward 与 success，不套 `FirmGraspRewardMixin`：
+# 那套几何夹持奖励的前提是「件重 80 g、指尖托不住」，而件其实是海绵（见 `ITEM_DENSITY`）。
+# 前提不成立，补丁就只剩副作用 —— 每加一条约束成功率塌一个量级，而 squint 原配方
+# 在其适用域内能到 1.00。账见 bd xb-jc5o。
 #
-# 与上面那个的唯一差别：**不套 `FirmGraspRewardMixin`**，reward 与 success 完全用 squint 原逻辑。
+# 起止的 home 段不由策略学：那两段是两个已知关节构型之间的过渡，关节空间插值经控制器
+# 走出来即可，不需要逆解。让策略学回家会把 400 步预算耗在收臂上，取放反而练不成。
 #
-# 为什么退回原配方：那套几何夹持奖励的前提是"件重 80g、指尖托不住"，而件其实是**海绵**
-# （见 `ITEM_DENSITY` 处）。前提不成立，补丁就只剩副作用——五轮实测 v9→v14 成功率
-# 0.31→0.008，每加一条约束塌一个量级，而 squint 原配方在其适用域内是能到 1.00 的。
-#
-# 起止的 home 段不在这里学（学回家曾让策略连取放都练不成，预算全耗在收臂上）：
-# home→取放起点、松手→home 这两段是**两个已知关节构型之间的过渡**，用关节空间平滑插值
-# 经控制器走出来即可，不需要逆解，也不需要策略去学。见 `hybrid/home_wrap.py`。
-# 回家要多走六七十步，400 步的预算全被取放占掉会让策略压根没机会摸到成功
-# ── 另外两种物料的 pick-and-place（数据集生产用）─────────────────────────────
-#
-# 与 cube_4 那对的差别只有物体：碰撞尺寸钉到各自 STEP 真值，视觉换成各自的 kit 网格。
-# 20mm 方块与 40mm 圆柱都在夹爪行程内（削薄后的两指净空 −10°→2.4mm、20°→42.1mm）。
+# 20 mm 方块与 40 mm 圆柱都在夹爪行程内（削薄后两指净空 −10°→2.4 mm、20°→42.1 mm）；
 # 圆柱走 squint 的 `item_type="can"` 分支。
 class KitSlowMixin(SlowRobotMixin, KitDualCameraMixin):
     """KIT 双相机 + 真机速度包线 + 高摩擦 + 30fps（重渲用）。
@@ -847,29 +836,16 @@ class KitSlowMixin(SlowRobotMixin, KitDualCameraMixin):
     SLOW_ROBOT_UID = "so101_kit_slow"
 
 
-# `SO101KitGeomPlaceCube4RealPure-v1` 的双相机孪生：机器人 uid 同为 `so101_kit_slow`、
-# 碰撞尺寸/密度/摩擦/撒点区逐字一致，**物理完全同构**，差别只在多一路 wrist 相机与换了渲染 mesh。
-# 于是"在单相机环境里 rollout 录 action，再在这里按同一初始状态重放 action 出图"是确定性等价的，
-# 这也正是 action-replay 验收门要检验的那件事。
-# ── pick-and-place：抓起来 + 放进料箱 + 松手退开 ──────────────────────────
+# ══ 对外分发环境：一个场景一个环境，就这三个 ═══════════════════════════════
 #
-# 上面那批 Lift 只到"抓住并抬离"。Place 的成功判据强得多（squint 原逻辑）：
-#   物体落在料箱 x/y 范围内 ∧ **夹爪已松开**(`~robot_touching_item`) ∧ 物体静止 ∧ 机器人静止
-# 也就是"东西真进箱了、手真放开了、都停稳了"——这个用画面自证，比在腕部视角里辨接触可靠。
+# 命名 `SO101<动词><物体><尺寸mm>-v<版本>`，名字里不带开发沿革。每个场景只有一个环境、
+# 带完整双相机（top + wrist），**录制与渲染共用它** —— 于是不存在「孪生环境是否逐字同构」
+# 这种要另外验的风险。
 #
-# 料箱默认尺寸（8×10×3cm）与 STEP `bin_2` 包围盒**逐字一致**，故不需要覆盖 bin 尺寸，
-# 只把 item 碰撞盒钉到 STEP 真值。
-
-
-# ══ 对外分发环境：一个场景一个环境 ═══════════════════════════════════════════
+# 成功判据用 squint 原逻辑：物体落在料箱 x/y 范围内 ∧ 夹爪已松开 ∧ 物体静止 ∧ 机器人静止。
+# 也就是「东西真进箱了、手真放开了、都停稳了」—— 这个用画面自证，比在腕部视角里辨接触可靠。
 #
-# 命名 `SO101<动词><物体><尺寸mm>-v<版本>`，名字里不带开发沿革（Kit/Geom/Real/Pure/Slow）。
-# 每个场景**只有一个**环境，带完整双相机（top + wrist），录制与渲染都用它 ——
-# 上面那些 `...Geom...` / `...Kit...` 成对出现的是历史遗留：两者用的是同一个机器人
-# `so101_kit_slow`、同一套物理，差别只有相机集合，没有理由拆成两个。
-# 合并的额外好处：录制端与渲染端物理**同一个环境**，不再存在"孪生环境是否逐字同构"的风险。
-#
-# 三个场景共用 `bin_2` 料箱（80×100×30mm，与 STEP 包围盒逐字一致）；
+# 三个场景共用 `bin_2` 料箱（80×100×30 mm，与 STEP 包围盒逐字一致，所以不覆盖 bin 尺寸）；
 # 物体碰撞尺寸钉到各自 STEP 真值，不随机。
 @register_env("SO101PickPlaceCube40-v1", max_episode_steps=400)
 class SO101PickPlaceCube40(KitSlowMixin, RealSizeItemMixin, ReachableSpawnMixin, Place):
@@ -902,14 +878,10 @@ class SO101PickPlaceCylinder40(KitSlowMixin, RealSizeItemMixin, ReachableSpawnMi
 
     ITEM_MESH = "cylinder_4"
     BIN_MESH = "bin_2"
-    # ★圆柱 STEP 件的建模轴是 y，物理体的轴是 z（squint 用 euler2quat(0,π/2,0)
-    #   把 `add_cylinder_collision` 的 x 轴转到 z）。缺这一行 ⇒ 视觉网格躺着渲染、
-    #   物理体却立着，画面上就是「圆柱倒在桌上」。
+    # 圆柱 STEP 件的建模轴是 y，物理体的轴是 z。缺这一行 ⇒ 视觉网格躺着渲染、
+    # 物理体却立着，画面上就是「圆柱倒在桌上」。
     ITEM_MESH_ROTATION = _CYLINDER_Y_TO_Z
     ITEM_SIZE_CONFIG = _cylinder_size_config("cylinder_4")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, item_type="can", **kwargs)
-
-
-# ══ 以下为历史遗留名，仅为兼容在跑的产线与既有 checkpoint 保留，新代码请用上面三个 ══

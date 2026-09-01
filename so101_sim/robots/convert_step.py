@@ -1,14 +1,18 @@
 """资产工具：把真机任务物体的 STEP（CAD）转成仿真可用的 mesh。
 
-真机 task1 的物体给的是 STEP 格式（`assets/objects/`）：两个方块、一个圆柱、一个黑 bin。
-仿真要用它们得先转成网格——cascadio（trimesh 的 OpenCASCADE 后端）读 STEP，导出：
+真机套件的物体给的是 STEP 格式：两个方块、一个圆柱、一个黑 bin。
+仿真要用它们得先转成网格 —— cascadio（trimesh 的 OpenCASCADE 后端）读 STEP，导出：
 
 - `<name>_visual.glb`：可视网格（带文件名 hex 颜色）。
 - `<name>_collision.obj`：凸包碰撞网格（sapien/PhysX 只吃凸体；bin 这类内凹件先用凸包，
   真正做"放进 bin"的凹腔碰撞是后续任务的事）。
 
 文件名编码信息：末尾 `#RRGGBB` 是颜色，`_N`（如 `cube_4`）是尺寸档（厘米）。产物落
-同目录 `kit_assets/objects/`，随包自包含。这是一次性资产工具（非课堂演示脚本）。
+同目录 `kit_assets/objects/`，随包自包含。
+
+**这是一次性资产工具，不在安装后的运行路径上。** 输入的 STEP 原件**不随本包分发**，
+`SRC` 指向的是当初转换时的仓库外位置；产物已经在 `kit_assets/objects/` 里，
+所以正常使用本包时不需要跑它。要重新转换就先把 STEP 放到 `SRC` 指的位置。
 """
 
 import re
@@ -40,6 +44,19 @@ def _color_from_name(name: str):
 
 
 def convert_all() -> None:
+    """把 `SRC` 下所有 STEP 转成可视 glb 与凸包碰撞 obj，落到 `DST`。
+
+    每个件打印包围盒全尺寸与颜色 —— 尺寸是下游钉碰撞盒的唯一真相源，
+    转换完要核一眼。
+
+    Raises:
+        FileNotFoundError: `SRC` 不存在（STEP 原件不随本包分发，见模块 docstring）。
+    """
+    if not SRC.is_dir():
+        raise FileNotFoundError(
+            f"STEP 原件目录不存在：{SRC}。它不随本包分发；"
+            "产物已在 kit_assets/objects/，正常使用不需要跑本工具。"
+        )
     DST.mkdir(parents=True, exist_ok=True)
     for step_path in sorted(SRC.glob("*.STEP")):
         stem = step_path.stem

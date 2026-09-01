@@ -24,6 +24,11 @@ S_CARRY = 5
 
 
 def main():
+    """逐条量 `H5_FILES` 里的咬合深度与搬运歪斜角，按批打印统计。
+
+    只读 h5 里存下的关节角与方块位姿，不重跑仿真 —— 起一个 GPU 环境只为拿到爪的
+    碰撞网格顶点与机器人基座位姿。
+    """
     env = gym.make(TASK, num_envs=1, control_mode="pd_joint_pos", obs_mode="state",
                    render_mode="all", sim_backend="gpu", domain_randomization=False,
                    max_episode_steps=100)
