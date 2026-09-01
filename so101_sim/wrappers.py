@@ -23,11 +23,8 @@ import gymnasium as gym
 
 from so101_sim._core import _make_maniskill
 
-# `DownsampleObsWrapper` 与 `ColorJitterWrapper` 取自 squint 的 vendored utils.py（MIT），
-# 已转为本项目自维护。`DownsampleObsWrapper` 与原文件逐字等价；`ColorJitterWrapper` 在
-# 「多相机拼接后按每 3 通道一组分别抖动」这一点上偏离了原文件（原文件只处理单相机 3 通道
-# 输入），其余逻辑（batch 维处理、归一化/反归一化往返、默认抖动幅度）保持一致，改动原因见
-# 该类的类文档。
+# `DownsampleObsWrapper` 与 `ColorJitterWrapper` 源自 squint（MIT），已转为本项目自维护。
+# 与上游的差异记在 `so101_sim/tasks/UPSTREAM.md`。
 
 
 class DownsampleObsWrapper(gym.ObservationWrapper):
@@ -39,7 +36,6 @@ class DownsampleObsWrapper(gym.ObservationWrapper):
     def __init__(self, env, target_size):
         super().__init__(env)
         self.target_size = target_size
-        # 更新观测空间
         old_rgb_space = self.observation_space['rgb']
         C = old_rgb_space.shape[-1]
         self.observation_space['rgb'] = gym.spaces.Box(
@@ -49,17 +45,17 @@ class DownsampleObsWrapper(gym.ObservationWrapper):
     def observation(self, obs):
         rgb = obs['rgb']  # (B, H, W, C) 或 (H, W, C)
         if rgb.shape[-2] == self.target_size:
-            return obs  # 已经是目标尺寸
+            return obs
 
-        # 兼容有无 batch 维两种情况
+        # ManiSkill 的原生观测有 batch 维、被 `squeeze` 过的没有，两种都要能进。
         squeeze = rgb.dim() == 3
         if squeeze:
             rgb = rgb.unsqueeze(0)
 
-        # (B, H, W, C) -> (B, C, H, W)，供 interpolate 使用
+        # interpolate 要通道在前。area 插值而非 bilinear：降到 16px 时它更接近
+        # 相机自身的像素平均，squint 的迁移结果就是在这个插值下取得的。
         rgb = rgb.permute(0, 3, 1, 2)
         rgb = F.interpolate(rgb.float(), size=(self.target_size, self.target_size), mode='area').to(torch.uint8)
-        # (B, C, H, W) -> (B, H, W, C)
         rgb = rgb.permute(0, 2, 3, 1)
 
         if squeeze:
@@ -88,12 +84,12 @@ class ColorJitterWrapper(gym.ObservationWrapper):
     def observation(self, obs):
         rgb = obs['rgb']  # (B, H, W, C) 或 (H, W, C)，uint8，C 是 3 的整数倍
 
-        # 兼容有无 batch 维两种情况
+        # ManiSkill 的原生观测有 batch 维、被 `squeeze` 过的没有，两种都要能进。
         squeeze = rgb.dim() == 3
         if squeeze:
             rgb = rgb.unsqueeze(0)
 
-        # (B, H, W, C) -> (B, C, H, W)，供 ColorJitter 使用
+        # torchvision 的 ColorJitter 只吃通道在前、值域 [0,1] 的浮点张量。
         rgb = rgb.permute(0, 3, 1, 2)
         rgb = rgb.float() / 255.0
 
@@ -103,14 +99,12 @@ class ColorJitterWrapper(gym.ObservationWrapper):
                 f"ColorJitterWrapper 只接受通道数是 3 的整数倍的输入（每 3 通道对应一路"
                 f"相机），但收到了 {num_channels} 通道。"
             )
-        # 每 3 通道一组（对应一路相机），各自独立抽样抖动参数，互不共享。
+        # 逐组调用而非采样一次复用：每次调用重新抽亮度/对比度/饱和度/色调，
+        # 于是两路相机拿到互不相关的色差，与两个物理传感器的实际情形一致。
         groups = [self.jitter(rgb[:, i:i + 3]) for i in range(0, num_channels, 3)]
         rgb = torch.cat(groups, dim=1)
 
-        # (B, C, H, W) -> (B, H, W, C)
         rgb = rgb.permute(0, 2, 3, 1)
-
-        # 转回 uint8
         rgb = (rgb.clamp(0, 1) * 255).to(torch.uint8)
 
         if squeeze:
@@ -122,9 +116,23 @@ class ColorJitterWrapper(gym.ObservationWrapper):
 
 def visual_rl_env(task: str, num_envs: int, image_size: int = 16, render_size: int = 128,
                    domain_randomization: bool = True) -> ManiSkillVectorEnv:
-    """给视觉 RL 用的批量环境：原生环境 + 展平 + 降采样 + 颜色抖动 + 向量化。"""
+    """给视觉 RL 用的批量环境：原生环境 + 展平 + 降采样 + 颜色抖动 + 向量化。
+
+    Args:
+        task: 已注册的环境 id。
+        num_envs: 批量份数。
+        image_size: 送进策略的方形边长。
+        render_size: 渲染边长，大于 `image_size` 时先渲后降采样。
+        domain_randomization: 是否开启域随机化。
+
+    Returns:
+        `ManiSkillVectorEnv`，`ignore_terminations=True`（RL 要固定步长收集）。
+    """
+    # 这里宽高同值是故意的：RL 观测是方形小图，不重建真机画面。
+    # 要与真机同构的画面走 `So101SimEnv`，它默认不覆盖标定分辨率。
     raw = _make_maniskill(task, num_envs=num_envs, obs_mode="rgb+segmentation",
-                          sensor_size=render_size, render_mode="all",
+                          sensor_width=render_size, sensor_height=render_size,
+                          render_mode="all",
                           domain_randomization=domain_randomization)
     env = FlattenRGBDObservationWrapper(raw, rgb=True, depth=False, state=True)
     if render_size != image_size:
@@ -134,7 +142,18 @@ def visual_rl_env(task: str, num_envs: int, image_size: int = 16, render_size: i
 
 
 def state_rl_env(task: str, num_envs: int, domain_randomization: bool = True) -> ManiSkillVectorEnv:
-    """只给关节状态向量的批量环境（跳过渲染管线），供状态策略与调试用。"""
-    raw = _make_maniskill(task, num_envs=num_envs, obs_mode="state", sensor_size=128,
+    """只给关节状态向量的批量环境（跳过渲染管线），供状态策略与调试用。
+
+    Args:
+        task: 已注册的环境 id。
+        num_envs: 批量份数。
+        domain_randomization: 是否开启域随机化。
+
+    Returns:
+        `ManiSkillVectorEnv`，观测是状态向量，不含画面。
+    """
+    # `obs_mode="state"` 不渲染，相机尺寸对观测没有影响，给个占位值即可。
+    raw = _make_maniskill(task, num_envs=num_envs, obs_mode="state",
+                          sensor_width=128, sensor_height=128,
                           render_mode="all", domain_randomization=domain_randomization)
     return ManiSkillVectorEnv(raw, num_envs, ignore_terminations=True, record_metrics=True)

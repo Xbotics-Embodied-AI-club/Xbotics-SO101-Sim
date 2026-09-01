@@ -14,7 +14,8 @@ def _make_maniskill(
     task: str,
     num_envs: int,
     obs_mode: str,
-    sensor_size: int,
+    sensor_width: int | None,
+    sensor_height: int | None,
     render_mode: str,
     domain_randomization: bool = False,
     control_mode: str | None = None,
@@ -36,12 +37,40 @@ def _make_maniskill(
       产线的轨迹（中位 368 帧），但**装不下更长的轨迹**。拿一条 ~550 帧的数据训出来的
       策略，在 400 步的环境里会在完成动作之前被截断 —— 同样不报错，同样得到一个会被
       误读成"策略没学会"的低成功率。数据集轨迹比 400 长时，这里显式放宽。
+
+    Args:
+        task: 已注册的环境 id。
+        num_envs: 批量份数，观测与奖励的首维。
+        obs_mode: ManiSkill 观测模式，如 `"rgb"` / `"state"`。
+        sensor_width: 相机宽，`None` 表示不覆盖环境自己的标定分辨率。
+        sensor_height: 相机高，与 `sensor_width` 同时给或同时不给。
+        render_mode: ManiSkill 渲染模式，`"all"` 才含第三人称画面。
+        domain_randomization: 是否开启域随机化。
+        control_mode: 见上文；`None` 用机器人默认模式。
+        max_episode_steps: 覆盖任务注册的单集步数上限，`None` 表示不覆盖。
+
+    Returns:
+        未包装的批量 ManiSkill 环境。
+
+    Raises:
+        ValueError: `sensor_width` 与 `sensor_height` 只给了一边。相机的竖直视野角是
+            ChArUco 标定值（fovy 59.17°）且固定，水平视野由宽高比推出来 ⇒ 只改一边
+            等于换了一台相机，渲出来的画面与真机、与已交付数据集不再同构。
     """
     kwargs = {}
     if control_mode is not None:
         kwargs["control_mode"] = control_mode
     if max_episode_steps is not None:
         kwargs["max_episode_steps"] = max_episode_steps
+    if (sensor_width is None) != (sensor_height is None):
+        raise ValueError(
+            "sensor_width 与 sensor_height 必须同时给或同时不给 —— "
+            "只改一边会在固定的竖直视野角下改掉宽高比，水平视野随之改变。"
+        )
+    # 都不给就不下发 sensor_configs，让环境 CameraConfig 里的标定分辨率生效 ——
+    # 数据产线走的正是这条路，于是评测画面默认与训练数据同构。
+    if sensor_width is not None:
+        kwargs["sensor_configs"] = dict(width=sensor_width, height=sensor_height)
     return gym.make(
         task,
         num_envs=num_envs,
@@ -49,6 +78,5 @@ def _make_maniskill(
         sim_backend="gpu",
         render_mode=render_mode,
         domain_randomization=domain_randomization,
-        sensor_configs=dict(width=sensor_size, height=sensor_size),
         **kwargs,
     )

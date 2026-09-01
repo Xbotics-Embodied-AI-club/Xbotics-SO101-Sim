@@ -107,19 +107,9 @@ def mesh_full_size(mesh_name):
     return _mesh_facts(_OBJECTS_DIR / f"{mesh_name}_visual.glb")[0]
 
 
-# ── STEP 文件名把两个方块的颜色标反了：按真机视频与物料表校正 ────────────────
-#
-# 颜色的传递链是 STEP 文件名 `#RRGGBB` → glb 顶点色 → `base_color`，转换本身没问题。
-# 错在源头：`cube_4_#b74e4d.STEP`（红）/ `cube_2_#9cbbd1.STEP`（淡蓝），而
-#   · 用户物料表：海绵方块 **2cm 红 / 4cm 蓝**，海绵圆柱 φ4×4cm 蓝
-#   · 真机视频（ModelScope `pick_up_a_cube_and_place_in_the_bin`，top 相机）：
-#     被抓的方块量得 **3.35–4.78cm**（以料箱 8×10cm 定标）= 4cm 那个，
-#     像素平均 **RGB[122,145,157]**，与 `#9cbbd1`(156,187,209) 同色系，绝非 `#b74e4d`(183,78,77)。
-# 两个独立来源一致，故判 STEP 文件名标反，此处按真值覆盖（不改 STEP、不改 glb，只改渲染色）。
-# 圆柱的 `#9cbbd1` 与物料表一致，不动。
-#
-# 这不是"好看不好看"的问题：数据要拿去训 VLA，指令说「拿蓝色方块」而画面是红的，
-# 语言接地直接错位。
+# STEP 文件名把两个方块的颜色标反了，此处按真值覆盖渲染色（不改 STEP、不改 glb）。
+# 数据要拿去训 VLA：指令说「拿蓝色方块」而画面是红的，语言接地直接错位。
+# 判据与两个独立证据源见 bd xb-fmgg。圆柱的 `#9cbbd1` 与物料表一致，不动。
 MESH_COLOR_OVERRIDE = {
     "cube_4": (0.612, 0.733, 0.820),      # #9cbbd1 淡蓝
     "cube_2": (0.718, 0.306, 0.302),      # #b74e4d 红
@@ -128,20 +118,27 @@ MESH_COLOR_OVERRIDE = {
 
 def _swap_visual_to_mesh(actor, glb_path, target_full_sizes, align="center",
                          mesh_rotation=None):
-    """把一个 Actor 每个并行子实例的渲染网格换成 glb（保留原碰撞盒，抓取判定/reward 不变）。
+    """把一个 Actor 每个并行子实例的渲染网格换成 glb，碰撞盒不动。
 
-    - `target_full_sizes`：形如 (num_envs, 3) 的目标全尺寸（米），把 mesh 各轴缩放到与原碰撞盒一致。
-    - `align`："center" 让 mesh 包围盒中心对到 actor 原点（方块/圆柱）；"bottom" 让 mesh 底面贴 z=0（料箱）。
-    在 `_load_scene` 里调用（GPU 烘焙前），换出的网格能进 GPU 渲染——与 `_paint_actor` 同一时机。
+    必须在 `_load_scene` 里调用（GPU 烘焙之前），换出的网格才进得了 GPU 渲染 ——
+    与 `_paint_actor` 同一时机。碰撞盒不动意味着抓取判定与 reward 不受影响。
 
-    **颜色必须显式给 RenderMaterial**：`RenderShapeTriangleMesh(filename=...)` 不会采用 glb 里的
-    顶点色，缺 material 时渲出来是灰白件（实测 item 像素中位色 178,178,178 而非 STEP 的 183,78,77）。
-    这里把 glb 顶点色（即 STEP 文件名 `#RRGGBB`）取出来喂 `base_color`，渲染才是真机件的颜色。
+    颜色必须显式给 `RenderMaterial`：`RenderShapeTriangleMesh(filename=...)` 不采用
+    glb 里的顶点色，缺 material 时渲出来是灰白件（实测 item 像素中位色 178,178,178
+    而非 STEP 的 183,78,77）。
 
-    **`mesh_rotation`（wxyz 四元数）修 mesh 建模轴与物理体轴不一致**：STEP 各件的建模轴不统一
-    —— `cube_4` 沿 z（包围盒中心 z=2cm），而 `cylinder_4` **沿 y**（中心 y=2cm）。squint 的圆柱
-    碰撞体是绕 y 转 90° 立起来沿 z 的，只做平移不做旋转 ⇒ **视觉圆柱躺着、物理圆柱立着**
-    （实测：腕部视角里圆面朝相机）。方块对称所以不受影响。旋转在缩放/对齐之前作用于 mesh 局部系。
+    Args:
+        actor: 要换渲染网格的 Actor，逐个并行子实例处理。
+        glb_path: STEP 转出的 glb 文件。
+        target_full_sizes: 形如 (num_envs, 3) 的目标全尺寸（米），mesh 各轴缩放到与
+            原碰撞盒一致。
+        align: `"center"` 让 mesh 包围盒中心对到 actor 原点（方块/圆柱）；
+            `"bottom"` 让 mesh 底面贴 z=0（料箱）。
+        mesh_rotation: wxyz 四元数，修 mesh 建模轴与物理体轴不一致。STEP 各件建模轴
+            不统一：`cube_4` 沿 z（包围盒中心 z=2cm），`cylinder_4` 沿 y（中心 y=2cm），
+            而 squint 的圆柱碰撞体是绕 y 转 90° 立起来沿 z 的 ⇒ 不转就是视觉躺着、
+            物理立着（实测腕部视角里圆面朝相机）。方块对称，不受影响。
+            旋转在缩放与对齐之前作用于 mesh 局部系。
     """
     ext, center, rgba = _mesh_facts(glb_path)
     override = MESH_COLOR_OVERRIDE.get(Path(glb_path).stem.replace("_visual", ""))
@@ -175,48 +172,25 @@ def _swap_visual_to_mesh(actor, glb_path, target_full_sizes, align="center",
         entity.add_component(rb)
 
 
-# ── KIT 与 vanilla 的 wrist_roll 零位差 90°：起始位姿必须换算 ──────────────────
-#
-# ★这是一处真实资产 bug，2026-08-14 才查出来。squint 任务把 `rest_qpos` 设成
-# **vanilla** `SO101.keyframes["start"]`，其 wrist_roll = −π/2 = −90°。而 KIT URDF 的
-# wrist_roll 限位是 **[−67.21°, 252.79°]** —— **−90° 在界外 22.79°**。
-#
-# 证据（两份 URDF 的 wrist_roll 行程宽度都恰好 320.00°，整体平移 +90.00°）：
-#     vanilla [−157.21, 162.79]   KIT [−67.21, 252.79]
-# ⇒ `KIT_wrist_roll = vanilla_wrist_roll + 90°`，vanilla 的 −90° 在 KIT 下应是 **0°**。
-# 真机 home 的 wrist_roll = −0.53° 也落在 0 附近，与该换算自洽。
-#
-# 不修的后果远不止"起始跳一下"（实测每集第 1 步 wrist_roll 硬跳 23.699°，之后 200 步恒定
-# —— 这是**限位截断**，不是重力下垂：下垂会随时间收敛且分布在多个关节）：
-# **控制器 target 被永久钉在限位外 22.8°**，delta 控制器的一切增量都从这个够不到的基准累加，
-# 在策略把它命令回 −67.21° 以上之前该关节完全不动 = 腕部滚转有 22.8° 死区，
-# 且整个抓取搬运过程腕部都贴着限位。此前长期查不出的"擦棱夹持而非两侧夹住"、
-# "给定固定姿态的 IK 大面积无解"，都能由此解释：腕部姿态自由度实际被限位吃掉了。
+# KIT URDF 的 wrist_roll 零位比 vanilla 高 90°：`KIT = vanilla + 90°`。
+# 沿用 vanilla 的 −90° 会落在 KIT 限位 [−67.21°, 252.79°] 外 22.79°，控制器 target 被
+# 永久钉在界外，腕部滚转出现 22.8° 死区且全程贴限位。证据与实测见 bd xb-1sc2。
 KIT_WRIST_ROLL_OFFSET = np.pi / 2
 
 
-# ── 起始位姿 = 真机开机位姿（REAL_HOME）─────────────────────────────────────
-#
-# 度制：[-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
-# 这不是挑出来的数，是**真机开机位姿**：与两份真机数据集的首帧中位逐关节吻合
-# （lift -102.7 vs -102.6/-102.0，elbow 93.0 vs 92.6/95.6，gripper 1.9 vs 1.0/1.2），
-# 六个关节量级各不相同，错位或反号会立刻露馅。已发布的 1449 集演示每一集第 0 帧
-# 都精确等于它（逐位标准差 0.000）。
-#
-# ★为什么 reset() 必须落在这里，而不是 vanilla 的 `start` keyframe：
-#   那个 keyframe 给的是 [0.5, -1.4, -0.0, 88.4, -0.8, 59.7]——与本包产出的数据相差
-#   **lift 101° / elbow 93° / gripper 58°**。于是拿这些数据训出来的策略在评测时
-#   从一个它从未见过的位形起步，前半段全在追赶，**成功率是 0，而且不报任何错**，
-#   看起来完全像"策略没学会"。我们自己在这上面栽过一次：同一份权重，
-#   只把起始姿态从 reset 默认换成 REAL_HOME，成功率 0/20 → 9/10。
-#
-#   所以这是个**默认值而非开关**。做成开关会让两种初值同时在用，比现在更难查。
-#   确实要旧行为的，显式覆盖 `self.rest_qpos`。
+# 起始位姿 = 真机开机位姿（度制）。与两份真机数据集的首帧中位逐关节吻合，
+# 已发布的 1449 集演示每一集第 0 帧都精确等于它（逐位标准差 0.000）。
+# 换成 vanilla 的 `start` keyframe 会让策略从没见过的位形起步：实测同一份权重，
+# 成功率 0/20 → 9/10。所以这是默认值而非开关，证据见 bd xb-1sc2。
 REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
 
 
 def kit_rest_qpos():
-    """起始位姿（弧度），KIT 关节约定。见上方 REAL_HOME_DEG 的说明。"""
+    """起始位姿，KIT 关节约定。
+
+    Returns:
+        六个关节角（弧度），即 `REAL_HOME_DEG` 的弧度形式。
+    """
     return np.radians(REAL_HOME_DEG).tolist()
 
 

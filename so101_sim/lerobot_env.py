@@ -5,8 +5,8 @@ lerobot 的 `make_env` 对 `so101_sim` 走通用分支：先 `import so101_sim` 
 是批量张量（首维 = num_envs），这里默认 num_envs=1、对首维取 `[0]`，对上层呈现成普通单
 环境接口——和 lerobot 自带的 `LiberoEnv` 一样，评测代码无需知道底层是 ManiSkill。
 
-`num_envs` 参数保留了泛化到批量的能力（obs 格式化 / 动作 reshape / reward / success 都按
-batch 维处理），但 `num_envs=1` 时的行为与之前完全一致，不破坏 lerobot 评测契约。
+`num_envs` 参数保留了泛化到批量的能力：obs 格式化、动作 reshape、reward 与 success 都按
+batch 维处理，`num_envs=1` 时对首维取 `[0]`，于是 lerobot 的评测契约仍然成立。
 
 这是本模块与仿真器之间**唯一的耦合点**：只有本文件依赖 `so101_sim.tasks` / ManiSkill，
 其它一切（评测、rollout、换色、机器人伪装）都只依赖 `So101SimEnv`。
@@ -32,6 +32,16 @@ def _to_numpy(x: Any) -> np.ndarray:
 
 
 class So101SimEnv(gym.Env):
+    """一个 SO-101 抓放场景的单环境视图，观测按 lerobot 评测约定给出。
+
+    Attributes:
+        task: 底层 ManiSkill 环境 id。
+        obs_type: `"pixels"` 或 `"pixels_agent_pos"`。
+        num_envs: 底层批量份数；为 1 时对外呈现成普通单环境。
+        observation_width: 实际生效的相机宽，从底层相机配置读出。
+        observation_height: 实际生效的相机高，从底层相机配置读出。
+    """
+
     metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
 
     def __init__(
@@ -40,49 +50,90 @@ class So101SimEnv(gym.Env):
         obs_type: str = "pixels_agent_pos",
         obs_mode: str = "rgb",
         render_mode: str = "rgb_array",
-        observation_width: int = 128,
-        observation_height: int = 128,
+        observation_width: int | None = None,
+        observation_height: int | None = None,
         episode_length: int = 400,
         num_envs: int = 1,
         control_mode: str | None = None,
         **kwargs,
     ):
+        """建一个已注册场景的单环境视图。
+
+        有两个参数必须与「被评策略所训数据是怎么产生的」对齐，配错都**不报错、
+        只会安静跑错**，而两者都表现为一个会被误读成「策略没学会」的低成功率：
+
+        - `control_mode`：已交付数据集录的是绝对关节角，要传 `"pd_joint_pos"`。
+          不传则用机器人默认的归一化增量模式，绝对角会被逐维 clip 到 ±1，
+          手臂以包线最大速度朝错误方向走。
+        - `episode_length`：要装得下数据集里的轨迹长度。三个分发任务注册的是 400 步，
+          够装脚本化产线的轨迹（中位 368 帧），但装不下更长的。
+
+        Args:
+            task: 已注册的环境 id（三个分发场景之一）。
+            obs_type: `"pixels"` 只给画面，`"pixels_agent_pos"` 另给关节位置。
+            obs_mode: 传给 ManiSkill 的观测模式。
+            render_mode: 传给 ManiSkill 的渲染模式。
+            observation_width: 相机宽。`None`（默认）表示不覆盖环境自己的标定分辨率 ——
+                数据产线就是直接用标定值渲的，所以默认不覆盖时本入口的画面与已交付
+                数据集同构，不依赖调用方记得填对数字。
+            observation_height: 相机高，与 `observation_width` 同时给或同时不给。
+            episode_length: 单集步数上限，同时下发给底层环境。只改本类属性而底层仍是
+                注册值的话，超长行为会被 ManiSkill 的 TimeLimit 截断而评测端看不出来。
+            num_envs: 底层批量份数。
+            control_mode: 动作语义。`None` 用机器人默认模式。
+            **kwargs: 忽略，容纳 lerobot 传来的其它环境参数。
+
+        Raises:
+            ValueError: `observation_width` 与 `observation_height` 只给了一边（等于在
+                标定好的竖直视野角下改宽高比，水平视野随之改变）；或各路相机尺寸不一致。
+            NotImplementedError: `obs_type` 不是支持的两个取值之一。
+        """
         super().__init__()
         self.task = task
         self.obs_type = obs_type
         self.render_mode = render_mode
-        self.observation_width = observation_width
-        self.observation_height = observation_height
         self.num_envs = num_envs
+        if (observation_width is None) != (observation_height is None):
+            raise ValueError(
+                "observation_width 与 observation_height 必须同时给或同时不给："
+                "只改一边等于在标定好的竖直视野角下改宽高比，水平视野会跟着变，"
+                "渲出来的画面与真机、与已交付数据集不再同构。"
+            )
         # lerobot 的 rollout 用 env.call("_max_episode_steps") 界定单集步数上限。
-        # 三个分发任务本身已注册 max_episode_steps=400，这里与之对齐。
-        # ★`episode_length` 同时要传给底层环境：只改这个属性而底层仍是 400 的话，
-        #   长于 400 帧的行为会被 ManiSkill 自己的 TimeLimit 截断，评测端却看不出来。
         self._max_episode_steps = episode_length
 
-        # 每个包装实例内部持有一个 num_envs 份的 ManiSkill 环境（GPU 后端、无头 RGB 渲染）。
-        # 三个分发场景已在 import so101_sim 时注册；task 即其 id。
-        # ★`control_mode` 必须与被评策略所训数据集里 `action` 的口径一致。已交付数据集
-        #   （脚本化产线、`Harrysunshine/so101-sim-pickplace`）录的是**绝对关节角**，
-        #   要传 `control_mode="pd_joint_pos"`；不传则用机器人默认的归一化增量模式。
-        #   混用不报错、只会安静地跑错，详见 `_core._make_maniskill` 的说明。
         self._env = _make_maniskill(
             task,
             num_envs=num_envs,
             obs_mode=obs_mode,
-            sensor_size=observation_width,
+            sensor_width=observation_width,
+            sensor_height=observation_height,
             render_mode=render_mode,
             control_mode=control_mode,
             max_episode_steps=episode_length,
         )
 
-        # 相机名不写死：三个场景各有 top 与 wrist 两路，和真机数据集一致，
-        # 直接取环境自己声明的传感器名，环境加相机或改名都不用回来改这里。
-        self._camera_names = sorted(self._env.unwrapped._sensor_configs)
+        # 相机名与尺寸都从环境实际生效的配置读，不写死、也不从构造参数推：
+        # 构造参数可能是 None（不覆盖），此时只有底层配置知道真实尺寸，
+        # 而观测空间一旦与实际吐出的形状分岔就没有任何一步会报错。
+        sensor_configs = self._env.unwrapped._sensor_configs
+        self._camera_names = sorted(sensor_configs)
 
-        # 观测空间：每路相机一张 RGB（+ 可选关节位置）。关节维度取自单环境动作/状态。
+        first = sensor_configs[self._camera_names[0]]
+        self.observation_height = int(first.height)
+        self.observation_width = int(first.width)
+        for name in self._camera_names[1:]:
+            config = sensor_configs[name]
+            if (int(config.height), int(config.width)) != (self.observation_height, self.observation_width):
+                raise ValueError(
+                    f"相机 {name} 是 {config.width}×{config.height}，"
+                    f"与 {self._camera_names[0]} 的 {self.observation_width}×{self.observation_height} 不同 —— "
+                    "本入口按「每路相机同尺寸」给出观测空间，不同尺寸时请显式处理"
+                )
+
         image_space = spaces.Box(
-            low=0, high=255, shape=(observation_height, observation_width, 3), dtype=np.uint8
+            low=0, high=255,
+            shape=(self.observation_height, self.observation_width, 3), dtype=np.uint8,
         )
         single_act = getattr(self._env, "single_action_space", self._env.action_space)
         self._action_dim = int(np.prod(single_act.shape[-1:]))
@@ -111,8 +162,18 @@ class So101SimEnv(gym.Env):
         )
 
     def _format_raw_obs(self, raw_obs: dict) -> dict:
-        # ManiSkill 观测：sensor_data.<相机名>.rgb (N,H,W,3) / agent.noisy_qpos (N,dof)。
-        # num_envs=1 时对首维取 [0]，还原成之前的单环境形状；否则整批返回。
+        """把 ManiSkill 的批量张量观测转成 lerobot 约定的 numpy 字典。
+
+        ManiSkill 那侧的键是 `sensor_data.<相机名>.rgb`（N,H,W,3）与
+        `agent.noisy_qpos`（N,dof）—— 用带噪版 qpos，与真机读数一样有测量噪声。
+
+        Args:
+            raw_obs: ManiSkill 的原始观测字典。
+
+        Returns:
+            `{"pixels": {相机名: 图}}`，`obs_type` 含关节位置时另有 `"agent_pos"`。
+            `num_envs=1` 时对首维取 `[0]`，否则整批返回。
+        """
         images = {}
         for name in self._camera_names:
             rgb = _to_numpy(raw_obs["sensor_data"][name]["rgb"]).astype(np.uint8)
@@ -124,13 +185,31 @@ class So101SimEnv(gym.Env):
         return {"pixels": images, "agent_pos": agent_pos}
 
     def reset(self, seed: int | None = None, **kwargs) -> tuple[dict, dict]:
+        """重置到该场景的开机位姿。
+
+        Args:
+            seed: 随机种子，决定物体的生成位置。
+            **kwargs: 忽略，容纳 gym 调用方传来的其它参数。
+
+        Returns:
+            `(观测, info)`；`info["is_success"]` 恒为假，成功只可能在 `step` 之后出现。
+        """
         super().reset(seed=seed)
         raw_obs, _ = self._env.reset(seed=seed)
         info = {"is_success": False} if self.num_envs == 1 else {"is_success": np.zeros(self.num_envs, dtype=bool)}
         return self._format_raw_obs(raw_obs), info
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict[str, Any]]:
-        # 上层给单环境动作 (dof,)（或批量 (num_envs,dof)）；ManiSkill 需要批量 (num_envs,dof)。
+        """走一步。动作的语义由构造时的 `control_mode` 决定。
+
+        Args:
+            action: 形状 `(dof,)`，`num_envs != 1` 时为 `(num_envs, dof)`。
+
+        Returns:
+            `(观测, reward, terminated, truncated, info)`。成功即计入 `terminated`；
+            单环境且本集结束时另给 `info["final_info"]`（与 lerobot 的 `LiberoEnv` 一致），
+            并就地 reset 让下一集从头开始。
+        """
         act = np.asarray(action, dtype=np.float32).reshape(self.num_envs, self._action_dim)
         raw_obs, reward, terminated, truncated, info = self._env.step(act)
 
@@ -150,12 +229,16 @@ class So101SimEnv(gym.Env):
         truncated_out = bool(truncated_batch[0])
         out_info = {"task": self.task, "is_success": is_success, "done": terminated_out}
         if terminated_out or truncated_out:
-            # 与 LiberoEnv 一致：给出 final_info，并就地 reset 让下一集从头开始。
             out_info["final_info"] = {"task": self.task, "is_success": is_success, "done": True}
             self.reset()
         return observation, reward_out, terminated_out, truncated_out, out_info
 
     def render(self) -> np.ndarray:
+        """给一帧画面。`render_mode="all"` 时是三路横向拼接（含第三人称）。
+
+        Returns:
+            `(H, W, 3)` 的 uint8 数组。
+        """
         frame = _to_numpy(self._env.render())
         return frame[0].astype(np.uint8) if frame.ndim == 4 else frame.astype(np.uint8)
 

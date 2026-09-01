@@ -20,8 +20,9 @@
 
        lerobot-eval --env.type=so101_sim --env.task=SO101PickPlaceCube40-v1
 
-   （`--env.type=so101_sim` 这个选项由 `platform/lerobot/0004-so101-sim-env.patch`
-   注册；不打该补丁时入口 1 仍可独立使用。）
+   （`--env.type=so101_sim` 这个选项由我们维护的 lerobot fork 注册，见
+   `Xbotics-Embodied-AI-club/lerobot` 的 `src/lerobot/envs/configs.py`；
+   用未打这层的 lerobot 时入口 1 仍可独立使用。）
 
 import 本包即完成注册：三个分发任务 + KIT 机器人 + lerobot 评测口。
 """
