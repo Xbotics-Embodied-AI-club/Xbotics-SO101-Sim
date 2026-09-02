@@ -5,6 +5,47 @@
 
 配套公开数据集：<https://huggingface.co/datasets/Harrysunshine/so101-sim-pickplace>
 
+## ★ 口径：仿真与真机怎么对齐的
+
+**两个入口，两套口径。选错不报错，只表现为一个会被误读成「策略没学会」的低成功率。**
+
+| 入口 | 怎么拿 | 状态与动作的口径 |
+|---|---|---|
+| 原生任务口 | `gym.make("SO101PickPlaceCube40-v1")` | **ManiSkill 原生弧度**，六维都是弧度 |
+| lerobot 评测口 | `gym.make("SO101Sim-v1", ...)`，或 lerobot 的 `--env.type=so101_sim` | **默认真机口径**（见下） |
+
+### 真机口径是「混的」，不是统一的角度
+
+真机数据由 `lerobot-record` 采集，走 lerobot 的 `so_follower`，而它逐关节配的归一化模式**不一样**：
+
+| 通道 | 真机口径 | 出处 |
+|---|---|---|
+| `shoulder_pan` … `wrist_roll`（5 个臂关节） | **度** | `SOFollowerConfig.use_degrees` 默认 `True` ⇒ `MotorNormMode.DEGREES` |
+| `gripper` | **0~100 行程百分比** | `so_follower` 把它**写死**为 `MotorNormMode.RANGE_0_100`，与 `use_degrees` 无关 |
+
+所以「统一到真机」不是一个单位换算，是**逐通道**换算。评测口默认（`unit_convention="real"`）就这么做：
+
+```
+臂关节：  弧度 → 度
+夹爪：    弧度 → (deg − deg_lo) / (deg_hi − deg_lo) × 100      # deg_lo/hi 取自夹爪关节自己的限位
+```
+
+要原生弧度就传 `unit_convention="maniskill"`（数据产线与直接对着 ManiSkill 写的代码走这一档）。
+
+### 为什么夹爪这一处特别容易错
+
+夹爪的**度数与百分比量级恰好撞车**（物理行程约 0~100 度），所以看数值看不出错。
+它只表现为抓取这一环学不动 —— 而抓取往往正是唯一学不会的环节。
+校验点：仿真「张开到位」44.95° → 49.95%，真机实测张开 50.6%。
+
+### 已经对齐的通道（逐通道审计过，不是推断）
+
+关节名与顺序 · 五个臂关节的度制 · 臂关节量程（URDF 限位换成度后与真机实测几乎逐关节吻合）·
+方向同向 · 相机键 `top`+`wrist` · 分辨率 480×640 · fps 30 · `robot_type=so_follower` · 任务文本。
+
+⚠️ 社区的 SO-101 数据集**不都是这个口径**：官方 `lerobot/svla_so101_pickplace` 是归一化
+±100（`action` 恰好触到 ±100.00，那是 clamp 的签名）。所以对齐只能以**你自己那台真机**为基准。
+
 ## 三个场景
 
 | 环境 id | 场景 |
