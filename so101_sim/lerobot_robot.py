@@ -170,26 +170,38 @@ class SO101SimRobot(Robot):
 
         Returns:
             置位之后的观测。
+
+        Raises:
+            KeyError: 场景里有物体而状态里没有它 —— 那个物体会静默留在复位位置，
+                于是场景不是录制时那个，回放结果没有可比性。
         """
         import json
 
         import torch
 
         inner = self._env._env.unwrapped
+        registry = inner.scene.state_dict_registry
         raw = json.loads(path.read_text())
 
-        def to_tensor(node):
-            """转成张量，并补上批维 —— 状态字典的每片都是 `(num_envs, k)`。
+        for group, known in (("actors", registry.actors), ("articulations", registry.articulations)):
+            recorded = set(raw.get(group, {}))
+            missing = set(known) - recorded
+            if missing:
+                raise KeyError(
+                    f"状态里缺这些{group}：{sorted(missing)} —— 它们会留在复位位置，"
+                    "场景就不是录制时那个了"
+                )
+            # 状态里多出来的是录制之后从场景里删掉的东西（例如只用于示意的标记物）。
+            # 丢掉它们，但要报出来 —— 悄悄丢会让人以为状态是完整恢复的。
+            extra = sorted(recorded - set(known))
+            if extra:
+                print(f"  置位时丢掉已不存在的{group}：{extra}")
+                raw[group] = {k: v for k, v in raw[group].items() if k in known}
 
-            录下来的是单环境某一帧，形状是 `(k,)`；不补批维 `set_state_dict` 会把
-            第一维当成环境数，于是按 k 个环境去铺，报形状不匹配或静默只设第一维。
-            """
+        def to_tensor(node):
             if isinstance(node, dict):
                 return {k: to_tensor(v) for k, v in node.items()}
-            arr = np.asarray(node, dtype=np.float32)
-            if arr.ndim == 1:
-                arr = arr[None, :]
-            return torch.as_tensor(arr, device=inner.device)
+            return torch.as_tensor(np.asarray(node, dtype=np.float32), device=inner.device)
 
         inner.set_state_dict(to_tensor(raw))
         # GPU 后端：改完状态要走一遍 apply/fetch，画面与后续读数才是新状态的。
