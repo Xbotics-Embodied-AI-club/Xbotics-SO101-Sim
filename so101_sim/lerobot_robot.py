@@ -100,6 +100,7 @@ class SO101SimRobot(Robot):
             unit_convention="real",
             # 集的边界由 lerobot 的命令管，环境不许自己 reset —— 见 So101SimEnv 的说明。
             auto_reset=False,
+            sim_backend=self.config.sim_backend,
         )
         self._obs, _ = self._env.reset(seed=self.config.seed)
         if self.config.initial_state_path:

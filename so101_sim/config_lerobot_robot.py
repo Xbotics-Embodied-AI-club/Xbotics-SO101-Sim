@@ -43,6 +43,11 @@ class SO101SimRobotConfig(RobotConfig):
             （`state` 形状 `(帧数, 6)`、`success` 形状 `(帧数,)`）。
             用于离线核对「喂进去的动作」与「量回来的状态」——比对是数据比对，
             驱动仍然是 lerobot 自己那条循环。
+        sim_backend: 物理后端。`"physx_cpu"`（默认）在单环境下每控制步 3.24ms、
+            带渲染整帧约 8ms ⇒ `lerobot-record` 能精确跑到 30 fps；`"gpu"` 每控制步
+            47.96ms（18.8 Hz），墙钟驱动的录制会把轨迹截断。两者接触行为在
+            `contact_offset` 声明成 5mm 之后已经一致（8 集最高点差 0.1~1.9mm），
+            所以这个开关只影响快慢 —— 但**跨后端复验仍要真的两边各跑一遍**。
         initial_state_path: 给了就在复位后把场景置成这份状态（ManiSkill 的
             `set_state_dict` 格式，json）。对应真机上「把物体摆到记录的位置」——
             回放一段录制的动作，物体不在原处就没有可比性。
@@ -56,3 +61,4 @@ class SO101SimRobotConfig(RobotConfig):
     video_camera: str | None = None
     state_log_path: str | None = None
     initial_state_path: str | None = None
+    sim_backend: str = "physx_cpu"
