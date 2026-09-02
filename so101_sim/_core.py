@@ -21,6 +21,7 @@ def _make_maniskill(
     control_mode: str | None = None,
     max_episode_steps: int | None = None,
     sim_backend: str = "gpu",
+    sim_config: dict | None = None,
 ):
     """构造一个原始（未包装）的批量 ManiSkill 环境，首维恒为 num_envs。
 
@@ -58,6 +59,9 @@ def _make_maniskill(
             `lerobot-record` 是墙钟驱动的，跑不到 30 Hz 就会把轨迹截断。
             批量训练那条路（`wrappers.visual_rl_env`，几十上百个环境）反过来，
             GPU 把启动开销摊薄了才划算，所以那侧仍用 `"gpu"`。
+        sim_config: 透给 ManiSkill 的 `SimConfig` 覆盖，`None` 表示不覆盖。
+            接触相关的旋钮（`scene_config.contact_offset` 等）会改物理，
+            改了就要重新验抓取，不能只看跑得快不快。
 
     Returns:
         未包装的批量 ManiSkill 环境。
@@ -81,6 +85,8 @@ def _make_maniskill(
     # 数据产线走的正是这条路，于是评测画面默认与训练数据同构。
     if sensor_width is not None:
         kwargs["sensor_configs"] = dict(width=sensor_width, height=sensor_height)
+    if sim_config is not None:
+        kwargs["sim_config"] = sim_config
     return gym.make(
         task,
         num_envs=num_envs,

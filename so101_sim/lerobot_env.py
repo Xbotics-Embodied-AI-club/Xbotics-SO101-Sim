@@ -59,6 +59,7 @@ class So101SimEnv(gym.Env):
         unit_convention: str = "real",
         auto_reset: bool = True,
         sim_backend: str = "physx_cpu",
+        sim_config: dict | None = None,
         **kwargs,
     ):
         """建一个已注册场景的单环境视图。
@@ -107,7 +108,15 @@ class So101SimEnv(gym.Env):
                 里并了 `success` ⇒ 一成功环境就换场景、手臂弹回 home，调用方却还在
                 按原轨迹发动作。实测表现是「回放到某帧后手臂暴走 81°、物体飞在空中」，
                 极像物理不可复现，其实是自己把场景换了。
-            **kwargs: 忽略，容纳 lerobot 传来的其它环境参数。
+            sim_config: 透给 ManiSkill 的 `SimConfig` 覆盖（如
+                `{"scene_config": {"contact_offset": 0.002}}`）。`None` 表示不覆盖。
+            **kwargs: 容纳 lerobot 传来的其它环境参数，**一律忽略但会打印出来**。
+
+                ★早先这里只写"忽略"、什么也不说，于是拼错的参数名与本类不认识的参数
+                都被静默吞掉。实账：为了查"两后端接触行为为什么不同"，我用
+                `sim_config=...` 扫了 `gpu_memory_config` 与 `contact_offset` 各五档，
+                两轮结果**逐位相同** —— 当时以为"参数无效"，其实是参数从没送到环境。
+                两轮扫描白做。所以现在忽略要**说出来**。
 
         Raises:
             ValueError: `observation_width` 与 `observation_height` 只给了一边（等于在
@@ -134,6 +143,8 @@ class So101SimEnv(gym.Env):
             )
         # lerobot 的 rollout 用 env.call("_max_episode_steps") 界定单集步数上限。
         self._max_episode_steps = episode_length
+        if kwargs:
+            print(f"So101SimEnv 忽略了这些参数：{sorted(kwargs)}")
 
         self._env = _make_maniskill(
             task,
@@ -145,6 +156,7 @@ class So101SimEnv(gym.Env):
             control_mode=control_mode,
             max_episode_steps=episode_length,
             sim_backend=sim_backend,
+            sim_config=sim_config,
         )
 
         # 相机名与尺寸都从环境实际生效的配置读，不写死、也不从构造参数推：
