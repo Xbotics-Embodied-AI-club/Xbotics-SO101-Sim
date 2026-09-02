@@ -1,3 +1,13 @@
+"""SO-101 机器人 agent，加载真机套件几何 `kit_assets/kit_v1_so101.urdf`。
+
+本包只有这一份几何，`wrist_roll` 的零位按实物安装标定（该关节真机不做标定）。
+几何里除 6 个活动关节外还有套件底板、型材框，以及两个相机的安装座与光学系
+（`top_camera_optical_frame` / `wrist_camera_optical_frame`，都是 fixed 关节、不加自由度）。
+相机 sensor 不在这里定义，而在 `so101_sim.envs` 里用 CameraConfig 绑到那两个光学系上。
+
+夹爪行程与关节限位一律从这份 URDF 现读 —— 换算标度取错会静默改变夹爪百分比。
+"""
+
 import copy
 
 import numpy as np
@@ -15,15 +25,62 @@ from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
 from pathlib import Path
 
+# 真机开机位姿（度制），与两份真机数据集的首帧中位逐关节吻合 ——
+# 已发布的演示每一集第 0 帧都精确等于它，逐位标准差 0.000。
+# 值按本模块那套几何的关节约定给，与限位同源。换成别的起始位形，策略从没见过的
+# 位姿起步，实测同一份权重成功率 0/20 → 9/10。取值与消融见 bd xb-1sc2。
+REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
+
+
+def kit_rest_qpos():
+    """起始位姿的弧度形式。
+
+    Returns:
+        六个关节角（弧度），即 `REAL_HOME_DEG` 的弧度形式。
+    """
+    return np.radians(REAL_HOME_DEG).tolist()
+
+
+# ── 关掉 4 对**假**自碰撞 ──────────────────────────────────────────────────
+#
+# URDF 的碰撞几何是 STL 的凸包，比真件胖。后果实测：命令机器人保持真机 home 位姿时，
+# `shoulder_link↔lower_arm_link` 接触力 130N 起步、几步内飙到 **18000N**，手臂被弹飞
+# （shoulder_pan −5.8°→+115°），shoulder_lift 被顶到关节限位 —— 于是仿真**回不到真机 home**。
+#
+# 哪几对是"假"的，用可证伪的判据定：真机 106085 帧里出现过的关节角，物理上一定不自碰
+# （真臂就那么摆着）。把这些关节角喂进仿真碰撞几何，重叠的就是假碰撞。
+# 实测（从真机轨迹等距抽 400 帧逐对检测重叠）：
+#
+#     lower_arm_link  ~ shoulder_link            105/400 帧(26%)  最大穿透 10.25mm
+#     gripper_link    ~ shoulder_link             14/400 帧       最大穿透  2.95mm
+#     wrist_camera_mount_link ~ wrist_link        12/400 帧       最大穿透  3.42mm
+#     shoulder_link   ~ wrist_link                 5/400 帧       最大穿透  1.12mm
+#
+# **四分之一的真机位姿在仿真里自碰** —— 此前"重放真机轨迹总不对劲"的物理来源。
+#
+# 只关这 4 对，不用 ManiSkill 的 `disable_self_collisions`（那是一刀切关掉整条 articulation
+# 内部所有自碰，手臂会能穿过 KIT 支架与相机柱，画面上要露馅）。
+# 机制：SAPIEN 的 `collision_groups[2]` 是"忽略掩码"，两个 shape 有公共 bit 就互不碰撞。
+# 每对分配一个独立 bit，互不串扰（已核对：任意非指定对的掩码交集为 0）。
+FALSE_SELF_COLLISION_PAIRS = [
+    ("lower_arm_link", "shoulder_link"),
+    ("gripper_link", "shoulder_link"),
+    ("wrist_camera_mount_link", "wrist_link"),
+    ("shoulder_link", "wrist_link"),
+]
+# 从 20 起，避开 ManiSkill 自己用的 bit 29（`disable_self_collisions`）
+_IGNORE_BIT_BASE = 20
+
 
 @register_agent()
 class SO101(BaseAgent):
     uid = "so101"
 
-    # Use the urdf file from this repo
+    # 唯一的那份几何：真机套件版，随包自包含，见 `robots/kit_assets/`。
     urdf_path = str(
-        Path(__file__).parent
-        / "so101.urdf"
+        Path(__file__).parent.parent
+        / "kit_assets"
+        / "kit_v1_so101.urdf"
     )
     urdf_config = dict(
         _materials=dict(
@@ -45,17 +102,10 @@ class SO101(BaseAgent):
         ),
     )
 
+    # 每个位姿都必须落在本几何的关节限位内 —— wrist_roll 只到 [−67.21°, 252.79°]。
     keyframes = dict(
         rest=Keyframe(
-            qpos=np.array(
-                [0, -1.5708, 1.5708, 0.66, -np.pi, -10 * np.pi / 180] # closed gripper
-            ),  # Fully open gripper
-            pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
-        ),
-        start=Keyframe(
-            qpos=np.array(
-                [0, 0, 0, np.pi / 2, -np.pi / 2, 60 * np.pi / 180] # sligtly open gripper
-            ),  # Cam up, fully open gripper
+            qpos=np.array(kit_rest_qpos()),
             pose=sapien.Pose(q=list(euler2quat(0, 0, np.pi / 2))),
         ),
         zero=Keyframe(
@@ -126,6 +176,16 @@ class SO101(BaseAgent):
             pd_joint_vel=pd_joint_vel,
         )
         return deepcopy_dict(controller_configs)
+
+    def _after_init(self):
+        """关掉几何自带的 4 对假自碰撞，见 `FALSE_SELF_COLLISION_PAIRS` 上方的账。"""
+        super()._after_init()
+        links = self.robot.links_map
+        for k, (a, b) in enumerate(FALSE_SELF_COLLISION_PAIRS):
+            bit = _IGNORE_BIT_BASE + k
+            for name in (a, b):
+                if name in links:
+                    links[name].set_collision_group_bit(group=2, bit_idx=bit, bit=1)
 
     def _after_loading_articulation(self):
         super()._after_loading_articulation()

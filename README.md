@@ -7,12 +7,17 @@
 
 ## ★ 口径：仿真与真机怎么对齐的
 
-**两个入口，两套口径。选错不报错，只表现为一个会被误读成「策略没学会」的低成功率。**
+**两套口径。选错不报错，只表现为一个会被误读成「策略没学会」的低成功率。**
 
 | 入口 | 怎么拿 | 状态与动作的口径 |
 |---|---|---|
 | 原生任务口 | `gym.make("SO101PickPlaceCube40-v1")` | **ManiSkill 原生弧度**，六维都是弧度 |
 | lerobot 评测口 | `gym.make("SO101Sim-v1", ...)`，或 lerobot 的 `--env.type=so101_sim` | **默认真机口径**（见下） |
+| lerobot 机器人口 | lerobot 的 `--robot.type=so101_sim` | **真机口径**，按关节名的动作字典 |
+
+机器人几何**只有一份** URDF（`robots/kit_assets/`）。两份 URDF 会对同一批关节给出不同限位，
+取到哪一份取决于注册了哪个 robot uid，而它静默改变夹爪的行程标度 ——
+110° 与 130° 把同一个 44.95° 算成 49.95% 或 42.27%。这条由测试钉住。
 
 ### 真机口径是「混的」，不是统一的角度
 
@@ -69,7 +74,7 @@ pip install git+https://github.com/Xbotics-Embodied-AI-club/Xbotics-SO101-Sim.gi
 pip install "lerobot[all] @ git+https://github.com/Xbotics-Embodied-AI-club/lerobot.git@main"
 ```
 
-## 两个入口
+## 三个入口
 
 ### 1. 原生（ManiSkill 批量环境）
 
@@ -103,12 +108,30 @@ lerobot-eval --env.type=so101_sim --env.task=SO101PickPlaceCube40-v1 --eval.n_ep
 
 `--env.type=so101_sim` 这个选项**上游 lerobot 没有**，由我们维护的 fork
 （[Xbotics-Embodied-AI-club/lerobot](https://github.com/Xbotics-Embodied-AI-club/lerobot)）注册。
-**依赖方向是单向的**：本包不 import lerobot，是 lerobot 认识本包 —— 所以只用入口 1 时
-根本不需要装 lerobot。
+**依赖方向是单向的**：本包的核心不 import lerobot（只有 `lerobot_robot.py` 这一个子模块用到它），
+所以只用入口 1 时根本不需要装 lerobot。
 
 ⚠️ 评测一个在**绝对关节角**数据上训出来的策略（含上面那个公开数据集）时必须传
 `control_mode="pd_joint_pos"`，否则动作被当成归一化增量，**不报错、只会安静地跑错**，
 低成功率会被误读成「策略没学会」。同理 `episode_length` 要装得下轨迹长度。
+
+### 3. lerobot 机器人（把仿真当一台真机）
+
+仿真也登记成一个 lerobot 机器人，于是**驱动真机的那些命令原样能用**。
+把真机数据集的 action 灌进仿真：
+
+```bash
+lerobot-replay \
+    --robot.type=so101_sim \
+    --robot.discover_packages_path=so101_sim \
+    --robot.video_path=out.mp4 \
+    --dataset.repo_id=<真机数据集> --dataset.root=<本地根> --dataset.episode=0
+```
+
+这是验证 sim2real 对齐最直接的做法：**同一条循环、同一套按关节名取值的动作字典**，
+换到真机就是驱动真机。没有第二份回放实现，也就没有第二套口径。
+`--robot.discover_packages_path` 是 lerobot 的插件发现口，本包在被 import 时完成注册 ——
+lerobot 侧不需要为此改任何代码。
 
 ## 结构
 
@@ -117,13 +140,13 @@ so101_sim/
 ├── envs.py                 三个分发场景，就是全部入口（mixin 组合：双相机 / 真机尺寸 / 可达生成 / 速度包线）
 ├── tasks/                  任务基类与成功判定（place.py + base_random_env.py）
 ├── robots/
-│   ├── so101_kit.py        KIT 版机器人（含底板、型材、两个相机支架）
-│   ├── so101_kit_slow.py   真机速度包线版
-│   ├── so101_base/         裸臂 SO101 本体与网格
-│   └── kit_assets/         KIT URDF + 网格 + 物体
+│   ├── so101_kit_slow.py   真机速度包线版（动作空间压进实测包线）
+│   ├── so101_base/so101.py 机器人本体：控制器、keyframe、抓取判定
+│   └── kit_assets/         **唯一**那份 URDF + 网格 + 物体
 ├── lerobot_env.py          入口 2：lerobot 评测口
+├── lerobot_robot.py        入口 3：把仿真登记成 lerobot 机器人（配置见 config_lerobot_robot.py）
 ├── wrappers.py             RL 观测包装 + visual_rl_env / state_rl_env
-└── _core.py                两个入口共享的 gym.make 内核（防止环境定义漂移）
+└── _core.py                各入口共享的 gym.make 内核（防止环境定义漂移）
 ```
 
 ## 拿它做强化学习

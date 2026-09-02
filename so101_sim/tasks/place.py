@@ -14,7 +14,7 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
 from so101_sim.tasks.base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
-from so101_sim.robots.so101_base.so101 import SO101
+from so101_sim.robots.so101_base.so101 import SO101, kit_rest_qpos
 
 
 @dataclass
@@ -74,18 +74,10 @@ class Place(DefaultCameraEnv):
     ):
         self.item_type = item_type
 
-        # Robot-specific configuration.
-        # 只在 robot_uids 恰为 "so101"（裸臂 vanilla）时才设这两个属性：
-        # KIT 版机器人（so101_kit_slow 等）的子类 mixin 在调用 super().__init__()
-        # 之前已经算好各自机型的 base_z_rot / rest_qpos（KIT 的 wrist_roll 零位与
-        # vanilla 相差 90°，见 so101_sim/envs.py 的 kit_rest_qpos），此处若无条件
-        # 覆盖会把那份换算值重新钉回 vanilla 数值，导致 KIT 机器人复位后关节角
-        # 与预期相差整整 90°。
-        # 同理，速度包线版 so101_slow 也由 SlowRobotMixin 负责设这两个属性，
-        # 不走这里——所以条件只认裸臂那一个 uid，不要放宽成前缀匹配。
-        if robot_uids == "so101":
-            self.base_z_rot = 0
-            self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
+        # 基座朝向与复位位姿只在这里设。`_load_agent` 与 `_initialize_episode` 都读它们，
+        # 由 mixin 各设一份就会出现同一个值的多处声明。
+        self.base_z_rot = 0
+        self.rest_qpos = kit_rest_qpos()
 
         # Handle domain randomization config
         self.domain_randomization_config = PlaceRandomizationConfig()
@@ -337,16 +329,6 @@ class Place(DefaultCameraEnv):
         # Randomize robot color
         self._randomize_robot_color()
 
-        # Goal site
-        goal_builder = self.scene.create_actor_builder()
-        goal_builder.add_sphere_visual(
-            radius=0.01,
-            material=sapien.render.RenderMaterial(base_color=[0, 1, 0, 1]),
-        )
-        goal_builder.initial_pose = sapien.Pose(p=[0, 0, 0.1])
-        self.goal_site = goal_builder.build_kinematic(name="goal_site")
-        self._hidden_objects.append(self.goal_site)
-
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
@@ -399,11 +381,6 @@ class Place(DefaultCameraEnv):
             bin_xyz[:, 2] = self.bin_thickness / 2
             qs = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             self.bin.set_pose(Pose.create_from_pq(bin_xyz, qs))
-
-            # Goal is above bin center
-            goal_xyz = bin_xyz.clone()
-            goal_xyz[:, 2] = self.bin_thickness + self.item_half_sizes[env_idx]
-            self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()

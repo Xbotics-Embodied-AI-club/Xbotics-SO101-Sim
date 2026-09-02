@@ -24,13 +24,13 @@
    `Xbotics-Embodied-AI-club/lerobot` 的 `src/lerobot/envs/configs.py`；
    用未打这层的 lerobot 时入口 1 仍可独立使用。）
 
-import 本包即完成注册：三个分发任务 + KIT 机器人 + lerobot 评测口。
+import 本包即完成注册：三个分发任务 + 机器人 + lerobot 评测口。
 """
 
 from gymnasium.envs.registration import register
 
-# 导入即向 ManiSkill 注册 KIT 机器人（KIT 版与真机速度包线版）
-from so101_sim.robots import so101_kit as _so101_kit  # noqa: F401
+# 导入即向 ManiSkill 注册机器人（基础版与真机速度包线版）
+from so101_sim.robots.so101_base import so101 as _so101  # noqa: F401
 from so101_sim.robots import so101_kit_slow as _so101_kit_slow  # noqa: F401
 
 # 导入即向 ManiSkill 注册三个分发环境

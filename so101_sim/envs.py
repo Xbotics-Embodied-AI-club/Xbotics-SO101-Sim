@@ -30,7 +30,6 @@ from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils.registration import register_env
 
 from so101_sim.tasks.place import Place
-from so101_sim.robots.so101_base.so101 import SO101
 
 from so101_sim.robots.so101_kit_slow import ITEM_FRICTION_RANGE, SIM_FPS
 
@@ -172,24 +171,6 @@ def _swap_visual_to_mesh(actor, glb_path, target_full_sizes, align="center",
         entity.add_component(rb)
 
 
-# 起始位姿 = 真机开机位姿（度制，**KIT 关节约定**）。与两份真机数据集的首帧中位逐关节
-# 吻合，已发布的 1449 集演示每一集第 0 帧都精确等于它（逐位标准差 0.000）。
-# 这里不能填 vanilla 的数：KIT 的 wrist_roll 零位比 vanilla 高 90°，vanilla 的 −90° 会落在
-# KIT 限位外 22.79°，控制器 target 被永久钉在界外、腕部滚转出现死区。
-# 也不能换成 vanilla 的 `start` keyframe：策略会从没见过的位形起步，实测同一份权重
-# 成功率 0/20 → 9/10。⇒ 这是默认值而非开关。两条的证据见 bd xb-1sc2。
-REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
-
-
-def kit_rest_qpos():
-    """起始位姿，KIT 关节约定。
-
-    Returns:
-        六个关节角（弧度），即 `REAL_HOME_DEG` 的弧度形式。
-    """
-    return np.radians(REAL_HOME_DEG).tolist()
-
-
 class KitDualCameraMixin:
     """把观测相机换成绑在 KIT URDF 光学系上的 top + wrist 两路，并对齐真机的黑臂白台外观。
 
@@ -197,7 +178,7 @@ class KitDualCameraMixin:
     盒/柱 item 与料箱的**渲染网格**换成真机演示套件的 STEP→mesh（碰撞盒不动，抓取/reward 不变）。
     """
 
-    SUPPORTED_ROBOTS = ["so100", "so101", "so101_kit"]
+    SUPPORTED_ROBOTS = ["so101", "so101_kit_slow"]
 
     # 子类可覆盖：把 item / bin 的视觉换成真机套件 mesh（None=沿用 squint 内置几何）。
     ITEM_MESH = None
@@ -207,21 +188,16 @@ class KitDualCameraMixin:
     ITEM_MESH_ROTATION = None
     BIN_MESH_ROTATION = None
 
-    def __init__(self, *args, robot_uids="so101_kit", domain_randomization_config=None, **kwargs):
+    def __init__(self, *args, robot_uids="so101", domain_randomization_config=None, **kwargs):
         """装好 KIT 机器人、真机起始位姿，并把机械臂与支架刷黑。
 
         Args:
             *args: 透传给父任务。
-            robot_uids: KIT 版机器人 uid。
+            robot_uids: 机器人 uid。
             domain_randomization_config: 父任务的域随机化配置，dict 或带 `.dict()` 的对象；
                 这里只往里补 `robot_color`，不覆盖调用方已给的键。
             **kwargs: 透传给父任务。
         """
-        # 基座朝向与 so101 一致（z 轴不旋转）。起始 qpos 必须是**KIT 约定**的值：
-        # vanilla 的 −90° wrist_roll 落在 KIT 限位外，见 `REAL_HOME_DEG` 上方的说明。
-        self.base_z_rot = 0
-        self.rest_qpos = kit_rest_qpos()
-
         # 把机械臂+相机支架刷黑：注入 robot_color 到任务的 DR 配置里，由 squint 的
         # _randomize_robot_color 统一着色（KIT URDF 里支架就是机器人的 link）。
         if domain_randomization_config is None:
@@ -745,13 +721,13 @@ class SlowRobotMixin:
 
     squint 的任务 `__init__` 只在 `robot_uids` 是 `so100`/`so101` 时才设 `base_z_rot` 与
     `rest_qpos`，换成别的 uid 会在 `_load_agent` 里报 `no attribute 'base_z_rot'`；
-    这里像 `KitDualCameraMixin` 一样显式补上（`so101_slow` 与 `so101` 同构）。
+    这里像 `KitDualCameraMixin` 一样显式补上。
 
     `control_freq` 设成 `SIM_FPS`（30）以对齐真机 task1；delta 上限在
     `so101_kit_slow.per_step_limits` 里按同一个 `SIM_FPS` 反算，故速度不随帧率漂。
     """
 
-    SLOW_ROBOT_UID = "so101_slow"
+    SLOW_ROBOT_UID = "so101_kit_slow"
 
     def __init__(self, *args, robot_uids=None, domain_randomization_config=None, **kwargs):
         """装好真机速度包线版机器人，并按几何选对应的起始位姿。
@@ -763,12 +739,6 @@ class SlowRobotMixin:
             domain_randomization_config: 父任务的配置；只补摩擦区间等本类声明的键。
             **kwargs: 透传给父任务。
         """
-        self.base_z_rot = 0
-        # 本 mixin 两种机器人都带：`so101_slow`（vanilla 几何）与子类覆盖的 `so101_kit_slow`
-        # （KIT 几何）。wrist_roll 零位只在 KIT 那份上差 90°，故按 uid 分支，不能一刀切。
-        self.rest_qpos = (kit_rest_qpos() if "kit" in self.SLOW_ROBOT_UID
-                          else SO101.keyframes["start"].qpos.tolist())
-
         if domain_randomization_config is None:
             config = {}
         elif isinstance(domain_randomization_config, dict):
@@ -795,24 +765,21 @@ class SlowRobotMixin:
         return cfg
 
 
-# 训练必须直接用 KIT 几何，不能"在 vanilla 训练 + 灌进 KIT 重渲"：两份 URDF 的
-# `wrist_roll` 子系零位恰差 90°（关节轴相同，相对旋转 90.00°；其余关节全为 0.000），
-# 同一个 qpos 在两边把夹爪放到不同位置 —— `gripper_link` 差 6.0 mm、`moving_jaw` 差
-# 38.1/13.7 mm。实测同批轨迹在 vanilla 侧 gap 中位 −1.53 mm / 贴合 94.6%，在 KIT 侧
-# +3.01 mm / 32.1% ⇒ 策略按一套几何学会夹紧，验收按另一套算，永远对不上。
-# 真机几何是固定事实，所以只能让训练迁到 KIT 这一侧。
+# 训练与重渲必须共用同一套几何 —— 换一套几何等于换一套 `wrist_roll` 零位，同一个 qpos
+# 把夹爪放到不同位置（实测 `gripper_link` 差 6.0 mm、`moving_jaw` 差 38.1/13.7 mm），
+# 策略按一套学会夹紧、验收按另一套算，永远对不上。别再引入第二套。账见 bd xb-1sc2。
 #
-# 障碍是 KIT 双相机发 6 通道而 squint 专家的 CNN 编码器只吃 3 通道，
-# 所以训练用 KIT 机器人 + squint 默认单相机，双相机只在重渲时用。
+# 双相机发 6 通道而 squint 专家的 CNN 编码器只吃 3 通道，
+# 所以专家训练用单相机，双相机只在重渲时用。
 
 
 class KitGeomSingleCamMixin(SlowRobotMixin):
-    """KIT 真机几何 + squint 默认单 base_camera（给专家训练/rollout 用）。
+    """真机速度包线机器人 + squint 默认单 base_camera（给专家训练/rollout 用）。
 
-    只把机器人换成 KIT 版；相机沿用父环境默认，故观测是 3 通道，与专家编码器匹配。
+    相机沿用父环境默认，故观测是 3 通道，与专家编码器匹配。
     """
 
-    SUPPORTED_ROBOTS = ["so100", "so101", "so101_slow", "so101_kit", "so101_kit_slow"]
+    SUPPORTED_ROBOTS = ["so101", "so101_kit_slow"]
     SLOW_ROBOT_UID = "so101_kit_slow"
 
 

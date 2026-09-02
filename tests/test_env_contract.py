@@ -46,6 +46,48 @@ def test_no_syspath_injection():
     assert hits == [], f"仍有 sys.path 注入：{hits}"
 
 
+def test_exactly_one_robot_urdf():
+    """包里只有一份机器人几何。
+
+    两份机器人 URDF 会对同一批关节给出不同限位，取到哪一份取决于注册了哪个 robot uid，
+    而它静默改变夹爪的行程标度 —— 110° 与 130° 把同一个 44.95° 算成 49.95% 或 42.27%。
+    """
+    urdfs = sorted(p.relative_to(PKG_ROOT).as_posix()
+                   for p in (PKG_ROOT / "so101_sim" / "robots").rglob("*.urdf"))
+    assert len(urdfs) == 1, f"机器人 URDF 必须只有一份，实际 {len(urdfs)} 份：{urdfs}"
+
+
+def test_every_keyframe_within_joint_limits():
+    """每个 keyframe 的 qpos 都落在那份 URDF 声明的关节限位内。
+
+    落在界外的 keyframe 不会报错，只会让控制器 target 永久钉在界外、该关节出现死区。
+    """
+    import xml.etree.ElementTree as ET
+
+    import numpy as np
+
+    from so101_sim.robots.so101_base.so101 import SO101
+
+    root = ET.parse(SO101.urdf_path).getroot()
+    limits = {
+        j.get("name"): (float(j.find("limit").get("lower")), float(j.find("limit").get("upper")))
+        for j in root.iter("joint")
+        if j.get("type") != "fixed" and j.find("limit") is not None
+    }
+    order = SO101.arm_joint_names + SO101.gripper_joint_names
+    assert set(order) <= set(limits), f"URDF 缺关节：{set(order) - set(limits)}"
+
+    for name, kf in SO101.keyframes.items():
+        qpos = np.asarray(kf.qpos, dtype=float).reshape(-1)
+        assert qpos.size == len(order), f"keyframe {name} 有 {qpos.size} 个关节角，应为 {len(order)}"
+        for joint, q in zip(order, qpos, strict=True):
+            lo, hi = limits[joint]
+            assert lo <= q <= hi, (
+                f"keyframe {name} 的 {joint} = {np.degrees(q):.2f}°，"
+                f"超出限位 [{np.degrees(lo):.2f}°, {np.degrees(hi):.2f}°]"
+            )
+
+
 @pytest.mark.parametrize("env_id", DISTRIBUTED_ENVS)
 def test_reset_step_shapes(env_id):
     """原生入口：obs/reward 首维恒为 num_envs，且在 GPU 上。"""

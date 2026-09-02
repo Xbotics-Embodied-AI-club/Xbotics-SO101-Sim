@@ -10,14 +10,12 @@
 
 import copy
 import os
-from pathlib import Path
 
 import numpy as np
 from mani_skill.agents.controllers import PDJointPosControllerConfig, deepcopy_dict
 from mani_skill.agents.registration import register_agent
 
-from so101_sim.robots.so101_base.so101 import SO101  # 裸臂 SO101
-from so101_sim.robots.so101_kit import KitFalseSelfCollisionMixin
+from so101_sim.robots.so101_base.so101 import SO101
 
 # 控制频率 = 数据集帧率（一步一帧）。**对齐真机 task1 的 30fps**。
 # ★注意 delta 上限是"每步"的量：帧率从 20 升到 30，若上限不变，
@@ -98,19 +96,7 @@ class FirmGraspMixin:
 
 
 @register_agent()
-class SO101Slow(FirmGraspMixin, SlowControllerMixin, SO101):
-    """裸臂 SO101 + 真机速度包线 + 严格抓取判据（vanilla 训练/rollout，单 base_camera）。"""
-
-    uid = "so101_slow"
-
-
-@register_agent()
-class SO101KitSlow(KitFalseSelfCollisionMixin, FirmGraspMixin, SlowControllerMixin, SO101):
-    """KIT 几何 + 真机速度包线 + 严格抓取判据（KIT 双相机重渲用）。
-
-    与 `SO101Kit` 一样要关掉 KIT 碰撞几何造成的 4 对假自碰撞——它们是几何自带的，
-    与速度包线无关，两个 KIT agent 都受影响。
-    """
+class SO101KitSlow(FirmGraspMixin, SlowControllerMixin, SO101):
+    """SO-101，动作空间压在真机速度包线内，抓取判据从严。"""
 
     uid = "so101_kit_slow"
-    urdf_path = str(Path(__file__).parent / "kit_assets" / "kit_v1_so101.urdf")
