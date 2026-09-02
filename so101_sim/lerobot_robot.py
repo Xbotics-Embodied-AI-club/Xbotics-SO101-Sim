@@ -44,6 +44,9 @@ class SO101SimRobot(Robot):
         self._frames: list[np.ndarray] = []
         self._states: list[np.ndarray] = []
         self._success: list[bool] = []
+        # 逐项判据，键名就是环境 `evaluate()` 给的那些（`is_item_above_bin` /
+        # `is_robot_static` / `robot_touching_item` / `robot_touching_bin` …）。
+        self._criteria: dict[str, list[float]] = {}
 
     @property
     def observation_features(self) -> dict:
@@ -144,6 +147,17 @@ class SO101SimRobot(Robot):
         self._obs, _, _, _, info = self._env.step(vec)
         if self.config.state_log_path:
             self._success.append(bool(info.get("is_success", False)))
+            # ★逐项记，不只记总判据。成功是四条的合取（物体在箱口内 ∧ 臂静止 ∧
+            #   臂不碰物体 ∧ 臂不碰料箱），只看总判据分不出"物体没放进去"与
+            #   "放进去了但手臂还在微动"—— 前者是数据废了，后者只是收尾没停稳。
+            #   ★按 dtype 判数值，不用 `np.isscalar`：`info` 里还有个字符串项 `task`，
+            #   而 numpy 的字符串标量也满足 `np.isscalar` ⇒ 放它过去之后 `float()` 抛错，
+            #   把整条回放打断在第 1 帧。
+            for key, value in info.items():
+                arr = np.asarray(value)
+                if key == "is_success" or arr.dtype.kind not in "biuf":
+                    continue
+                self._criteria.setdefault(key, []).append(float(arr.reshape(-1)[0]))
         return {f"{n}.pos": float(vec[i]) for i, n in enumerate(JOINT_NAMES)}
 
     def disconnect(self) -> None:
@@ -157,7 +171,9 @@ class SO101SimRobot(Robot):
             path.parent.mkdir(parents=True, exist_ok=True)
             n = min(len(self._states), len(self._success)) if self._success else len(self._states)
             np.savez(path, state=np.stack(self._states)[:n],
-                     success=np.asarray(self._success[:n], dtype=bool))
+                     success=np.asarray(self._success[:n], dtype=bool),
+                     **{k: np.asarray(v[:n], dtype=np.float32)
+                        for k, v in self._criteria.items()})
         self._env.close()
         self._env = None
         self._obs = None
