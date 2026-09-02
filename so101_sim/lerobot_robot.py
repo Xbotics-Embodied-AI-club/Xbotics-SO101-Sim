@@ -172,7 +172,7 @@ class SO101SimRobot(Robot):
             置位之后的观测。
 
         Raises:
-            KeyError: 场景里有物体而状态里没有它 —— 那个物体会静默留在复位位置，
+            KeyError: 场景里有会动的物体而状态里没有它 —— 它会留在随机的复位位置，
                 于是场景不是录制时那个，回放结果没有可比性。
         """
         import json
@@ -185,11 +185,16 @@ class SO101SimRobot(Robot):
 
         for group, known in (("actors", registry.actors), ("articulations", registry.articulations)):
             recorded = set(raw.get(group, {}))
-            missing = set(known) - recorded
-            if missing:
+            # 静态体在物理上不可能动，`get_state_dict` 也不收它们 —— 缺了无所谓。
+            # 会动的缺了就必须停：它会留在复位位置，而复位位置是随机的。
+            missing_movable = sorted(
+                n for n in set(known) - recorded
+                if getattr(known[n], "px_body_type", "dynamic") != "static"
+            )
+            if missing_movable:
                 raise KeyError(
-                    f"状态里缺这些{group}：{sorted(missing)} —— 它们会留在复位位置，"
-                    "场景就不是录制时那个了"
+                    f"状态里缺这些会动的{group}：{missing_movable} —— 它们会留在复位位置，"
+                    "而复位位置是随机的，场景就不是录制时那个了"
                 )
             # 状态里多出来的是录制之后从场景里删掉的东西（例如只用于示意的标记物）。
             # 丢掉它们，但要报出来 —— 悄悄丢会让人以为状态是完整恢复的。
