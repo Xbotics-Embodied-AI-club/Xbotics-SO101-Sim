@@ -64,6 +64,23 @@ class SO101SimRobot(Robot):
         return {f"{name}.pos": float for name in JOINT_NAMES}
 
     @property
+    def cameras(self) -> dict:
+        """这台机器人有哪几路相机 —— 键是相机名，值是它的画面形状。
+
+        `lerobot-record` 要用它：`num_image_writer_threads_per_camera * len(robot.cameras)`
+        决定写图线程数。真机 follower 那侧 `cameras` 是真的相机对象字典；仿真这侧
+        画面由 `get_observation` 一并给出，没有独立的相机对象，所以给形状就够。
+        （`unitree_g1` 也是这么把 `cameras` 实现成属性的。）
+
+        ★不能不实现：`lerobot_record.py:522` 用 `hasattr` 兜了底，但 548 行直接
+        `len(robot.cameras)` 没兜 —— 少了它就是 `AttributeError`，而不是退化成 0。
+        """
+        if self._env is None:
+            return {}
+        shape = (self._env.observation_height, self._env.observation_width, 3)
+        return {cam: shape for cam in self._env._camera_names}
+
+    @property
     def is_connected(self) -> bool:
         return self._env is not None
 
