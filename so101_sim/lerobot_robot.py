@@ -170,23 +170,27 @@ class SO101SimRobot(Robot):
 
         Returns:
             置位之后的观测。
-
-        Raises:
-            RuntimeError: 置位后渲染没跟上 —— GPU 后端改状态必须显式刷新，
-                否则画面还是旧的而数值已经变了。
         """
         import json
 
         import torch
 
+        inner = self._env._env.unwrapped
         raw = json.loads(path.read_text())
 
         def to_tensor(node):
+            """转成张量，并补上批维 —— 状态字典的每片都是 `(num_envs, k)`。
+
+            录下来的是单环境某一帧，形状是 `(k,)`；不补批维 `set_state_dict` 会把
+            第一维当成环境数，于是按 k 个环境去铺，报形状不匹配或静默只设第一维。
+            """
             if isinstance(node, dict):
                 return {k: to_tensor(v) for k, v in node.items()}
-            return torch.as_tensor(np.asarray(node, dtype=np.float32), device=self._env._env.device)
+            arr = np.asarray(node, dtype=np.float32)
+            if arr.ndim == 1:
+                arr = arr[None, :]
+            return torch.as_tensor(arr, device=inner.device)
 
-        inner = self._env._env.unwrapped
         inner.set_state_dict(to_tensor(raw))
         # GPU 后端：改完状态要走一遍 apply/fetch，画面与后续读数才是新状态的。
         if inner.gpu_sim_enabled:
