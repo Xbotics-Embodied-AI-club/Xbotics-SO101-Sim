@@ -39,6 +39,14 @@ class SO101SimRobotConfig(RobotConfig):
         seed: 复位种子，决定物体生成位置。同一个种子给出同一个场景。
         video_path: 给了就把机器人相机看到的画面写成 mp4（在 `disconnect` 时落盘）。
         video_camera: 写进视频的相机名。`None` 表示用名字里带 `top` 的那一路。
+        state_log_path: 给了就把每一帧测到的关节位置与成功判据写成 npz
+            （`state` 形状 `(帧数, 6)`、`success` 形状 `(帧数,)`）。
+            用于离线核对「喂进去的动作」与「量回来的状态」——比对是数据比对，
+            驱动仍然是 lerobot 自己那条循环。
+        initial_state_path: 给了就在复位后把场景置成这份状态（ManiSkill 的
+            `set_state_dict` 格式，json）。对应真机上「把物体摆到记录的位置」——
+            回放一段录制的动作，物体不在原处就没有可比性。
+            不给则由 `seed` 决定物体位置。
     """
 
     task: str = "SO101PickPlaceCube40-v1"
@@ -46,3 +54,5 @@ class SO101SimRobotConfig(RobotConfig):
     seed: int = 0
     video_path: str | None = None
     video_camera: str | None = None
+    state_log_path: str | None = None
+    initial_state_path: str | None = None

@@ -42,6 +42,8 @@ class SO101SimRobot(Robot):
         self._env: So101SimEnv | None = None
         self._obs: dict[str, Any] | None = None
         self._frames: list[np.ndarray] = []
+        self._states: list[np.ndarray] = []
+        self._success: list[bool] = []
 
     @property
     def observation_features(self) -> dict:
@@ -78,7 +80,11 @@ class SO101SimRobot(Robot):
             unit_convention="real",
         )
         self._obs, _ = self._env.reset(seed=self.config.seed)
+        if self.config.initial_state_path:
+            self._obs = self._apply_initial_state(Path(self.config.initial_state_path))
         self._frames = []
+        self._states = []
+        self._success = []
 
     @property
     def is_calibrated(self) -> bool:
@@ -112,6 +118,8 @@ class SO101SimRobot(Robot):
         obs.update(self._obs["pixels"])
         if self.config.video_path:
             self._frames.append(self._pick_frame(self._obs["pixels"]))
+        if self.config.state_log_path:
+            self._states.append(pos.astype(np.float32))
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
@@ -133,7 +141,9 @@ class SO101SimRobot(Robot):
         if missing:
             raise KeyError(f"动作里缺这些关节：{missing}；收到的键是 {sorted(action)}")
         vec = np.array([float(action[f"{n}.pos"]) for n in JOINT_NAMES], dtype=np.float32)
-        self._obs, _, _, _, _ = self._env.step(vec)
+        self._obs, _, _, _, info = self._env.step(vec)
+        if self.config.state_log_path:
+            self._success.append(bool(info.get("is_success", False)))
         return {f"{n}.pos": float(vec[i]) for i, n in enumerate(JOINT_NAMES)}
 
     def disconnect(self) -> None:
@@ -142,9 +152,48 @@ class SO101SimRobot(Robot):
             return
         if self.config.video_path and self._frames:
             self._write_video()
+        if self.config.state_log_path and self._states:
+            path = Path(self.config.state_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            n = min(len(self._states), len(self._success)) if self._success else len(self._states)
+            np.savez(path, state=np.stack(self._states)[:n],
+                     success=np.asarray(self._success[:n], dtype=bool))
         self._env.close()
         self._env = None
         self._obs = None
+
+    def _apply_initial_state(self, path: Path) -> dict[str, Any]:
+        """把场景置成给定状态，并回读一份观测。
+
+        Args:
+            path: ManiSkill `get_state_dict()` 的 json 形式。
+
+        Returns:
+            置位之后的观测。
+
+        Raises:
+            RuntimeError: 置位后渲染没跟上 —— GPU 后端改状态必须显式刷新，
+                否则画面还是旧的而数值已经变了。
+        """
+        import json
+
+        import torch
+
+        raw = json.loads(path.read_text())
+
+        def to_tensor(node):
+            if isinstance(node, dict):
+                return {k: to_tensor(v) for k, v in node.items()}
+            return torch.as_tensor(np.asarray(node, dtype=np.float32), device=self._env._env.device)
+
+        inner = self._env._env.unwrapped
+        inner.set_state_dict(to_tensor(raw))
+        # GPU 后端：改完状态要走一遍 apply/fetch，画面与后续读数才是新状态的。
+        if inner.gpu_sim_enabled:
+            inner.scene._gpu_apply_all()
+            inner.scene.px.gpu_update_articulation_kinematics()
+            inner.scene._gpu_fetch_all()
+        return self._env._format_raw_obs(inner.get_obs())
 
     def _pick_frame(self, pixels: dict[str, np.ndarray]) -> np.ndarray:
         """挑一路相机的当前帧。
