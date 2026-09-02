@@ -81,6 +81,8 @@ class SO101SimRobot(Robot):
             control_mode=CONTROL_MODE,
             episode_length=self.config.episode_length,
             unit_convention="real",
+            # 集的边界由 lerobot 的命令管，环境不许自己 reset —— 见 So101SimEnv 的说明。
+            auto_reset=False,
         )
         self._obs, _ = self._env.reset(seed=self.config.seed)
         if self.config.initial_state_path:
@@ -88,6 +90,7 @@ class SO101SimRobot(Robot):
         self._frames = []
         self._states = []
         self._success = []
+        self._criteria = {}
 
     @property
     def is_calibrated(self) -> bool:

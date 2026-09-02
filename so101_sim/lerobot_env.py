@@ -57,6 +57,7 @@ class So101SimEnv(gym.Env):
         num_envs: int = 1,
         control_mode: str | None = None,
         unit_convention: str = "real",
+        auto_reset: bool = True,
         **kwargs,
     ):
         """建一个已注册场景的单环境视图。
@@ -95,6 +96,12 @@ class So101SimEnv(gym.Env):
             unit_convention: 状态与动作对外的口径。`"real"`（默认）= 真机口径：
                 五个臂关节度制、夹爪 0~100 行程百分比；`"maniskill"` = 原生弧度。
                 只影响 `agent_pos` 与动作，不影响画面。
+            auto_reset: 本集结束时是否就地 reset。`True`（默认）满足 gym 契约，
+                `lerobot-eval` 靠它连续跑多集。**驱动机器人插件时必须给 `False`**：
+                集的边界由 `lerobot-record` / `lerobot-replay` 管，而 `terminated`
+                里并了 `success` ⇒ 一成功环境就换场景、手臂弹回 home，调用方却还在
+                按原轨迹发动作。实测表现是「回放到某帧后手臂暴走 81°、物体飞在空中」，
+                极像物理不可复现，其实是自己把场景换了。
             **kwargs: 忽略，容纳 lerobot 传来的其它环境参数。
 
         Raises:
@@ -113,6 +120,7 @@ class So101SimEnv(gym.Env):
                 f"unit_convention 只能是 'real' 或 'maniskill'，收到 {unit_convention!r}"
             )
         self.unit_convention = unit_convention
+        self.auto_reset = auto_reset
         if (observation_width is None) != (observation_height is None):
             raise ValueError(
                 "observation_width 与 observation_height 必须同时给或同时不给："
@@ -289,7 +297,14 @@ class So101SimEnv(gym.Env):
         out_info = {"task": self.task, "is_success": is_success, "done": terminated_out}
         if terminated_out or truncated_out:
             out_info["final_info"] = {"task": self.task, "is_success": is_success, "done": True}
-            self.reset()
+            # ★只有 gym 契约那一侧需要就地 reset（`lerobot-eval` 靠它连续跑多集）。
+            #   机器人插件那一侧**必须不 reset**：集的边界由 `lerobot-record` /
+            #   `lerobot-replay` 管，环境自己重置会把场景重新撒点、手臂弹回 home，
+            #   而调用方还在按原轨迹发动作。实测表现是「回放到某一帧后手臂暴走 81°、
+            #   物体飞在空中」—— 看起来像物理不可复现，其实是自己把场景换了。
+            #   触发条件很隐蔽：`terminated` 里并了 `success`，所以**一成功就换场景**。
+            if self.auto_reset:
+                self.reset()
         return observation, reward_out, terminated_out, truncated_out, out_info
 
     def render(self) -> np.ndarray:
