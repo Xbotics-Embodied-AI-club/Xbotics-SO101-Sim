@@ -155,3 +155,70 @@ def test_no_train_env_module():
 
     assert not hasattr(so101_sim, "make_train_env")
     assert not (Path(so101_sim.__file__).parent / "train_env.py").exists()
+
+
+@pytest.mark.parametrize(
+    ("joint_unit", "limit"),
+    [("deg", 30.0), ("rad", 3.2)],
+)
+def test_lerobot_port_joint_unit(joint_unit, limit):
+    """lerobot 评测口按 `joint_unit` 给关节角，默认那档要与已交付数据集的度制一致。
+
+    判据用量级而不是具体数值：复位位姿会随场景调整而变，但「度」与「弧度」差 57.3 倍，
+    量级判据跨得过前者、跨不过后者。ManiSkill 内部恒为弧度，所以 `"rad"` 那档是原值。
+    """
+    import gymnasium as gym
+    import numpy as np
+
+    import so101_sim  # noqa: F401
+
+    env = gym.make(
+        "SO101Sim-v1",
+        task="SO101PickPlaceCube40-v1",
+        episode_length=50,
+        control_mode="pd_joint_pos",
+        joint_unit=joint_unit,
+    )
+    try:
+        obs, _ = env.reset(seed=0)
+        peak = float(np.abs(obs["agent_pos"]).max())
+        bound = float(np.abs(env.action_space.high).max())
+        if joint_unit == "deg":
+            assert peak > limit, f"agent_pos 峰值 {peak} 不像度制"
+            assert bound > limit, f"动作空间上界 {bound} 不像度制"
+        else:
+            assert peak < limit, f"agent_pos 峰值 {peak} 不像弧度"
+            assert bound < 10.0, f"动作空间上界 {bound} 不像弧度"
+    finally:
+        env.close()
+
+
+def test_lerobot_port_action_roundtrips_to_sim_radians():
+    """按度下发的动作，走完一步后关节角要停在下发的那个度数附近。
+
+    这条才是真正的判据：只验观测单位的话，动作那侧漏掉换算不会被抓到 ——
+    而漏掉动作换算恰恰是最致命的一半（度值进弧度动作空间会逐维顶到限位）。
+    """
+    import gymnasium as gym
+    import numpy as np
+
+    import so101_sim  # noqa: F401
+
+    env = gym.make(
+        "SO101Sim-v1",
+        task="SO101PickPlaceCube40-v1",
+        episode_length=50,
+        control_mode="pd_joint_pos",
+        joint_unit="deg",
+    )
+    try:
+        start, _ = env.reset(seed=0)
+        target = np.asarray(start["agent_pos"], dtype=np.float32).copy()
+        target[0] += 5.0  # 只动底座 5°，够大到能测出来，又小到一步内跟得上
+        target = np.clip(target, env.action_space.low, env.action_space.high)
+        for _ in range(10):
+            obs, *_ = env.step(target)
+        err = float(abs(obs["agent_pos"][0] - target[0]))
+        assert err < 2.0, f"底座停在 {obs['agent_pos'][0]}°，目标 {target[0]}°，差 {err}°"
+    finally:
+        env.close()

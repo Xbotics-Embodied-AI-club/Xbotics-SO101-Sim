@@ -40,9 +40,10 @@ class So101SimEnv(gym.Env):
         num_envs: 底层批量份数；为 1 时对外呈现成普通单环境。
         observation_width: 实际生效的相机宽，从底层相机配置读出。
         observation_height: 实际生效的相机高，从底层相机配置读出。
+        joint_unit: 关节角对外的单位，`"deg"` 或 `"rad"`。
     """
 
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
     def __init__(
         self,
@@ -55,18 +56,24 @@ class So101SimEnv(gym.Env):
         episode_length: int = 400,
         num_envs: int = 1,
         control_mode: str | None = None,
+        joint_unit: str = "deg",
         **kwargs,
     ):
         """建一个已注册场景的单环境视图。
 
-        有两个参数必须与「被评策略所训数据是怎么产生的」对齐，配错都**不报错、
-        只会安静跑错**，而两者都表现为一个会被误读成「策略没学会」的低成功率：
+        有三个参数必须与「被评策略所训数据是怎么产生的」对齐，配错都**不报错、
+        只会安静跑错**，而三者都表现为一个会被误读成「策略没学会」的低成功率：
 
         - `control_mode`：已交付数据集录的是绝对关节角，要传 `"pd_joint_pos"`。
           不传则用机器人默认的归一化增量模式，绝对角会被逐维 clip 到 ±1，
           手臂以包线最大速度朝错误方向走。
         - `episode_length`：要装得下数据集里的轨迹长度。三个分发任务注册的是 400 步，
           够装脚本化产线的轨迹（中位 368 帧），但装不下更长的。
+        - `joint_unit`：ManiSkill 内部一律弧度，而**已交付的仿真与真机数据集一律度制**
+          （真机舵机就按度读写，仿真数据产线在落盘时换算过）。本入口是给 lerobot 策略
+          评测用的，策略说什么单位由它训练的数据决定 ⇒ 默认 `"deg"`。留 `"rad"` 是给
+          直接对着 ManiSkill 原生口径写的调用方。差 57.3 倍：观测偏小 57.3 倍会让归一化
+          输出远离训练分布，动作偏大 57.3 倍会逐维顶到关节限位。
 
         Args:
             task: 已注册的环境 id（三个分发场景之一）。
@@ -81,11 +88,15 @@ class So101SimEnv(gym.Env):
                 注册值的话，超长行为会被 ManiSkill 的 TimeLimit 截断而评测端看不出来。
             num_envs: 底层批量份数。
             control_mode: 动作语义。`None` 用机器人默认模式。
+            joint_unit: 关节角对外的单位。`"deg"`（默认）与已交付数据集一致；
+                `"rad"` 是 ManiSkill 的原生口径。只影响 `agent_pos` 与动作，
+                不影响画面。
             **kwargs: 忽略，容纳 lerobot 传来的其它环境参数。
 
         Raises:
             ValueError: `observation_width` 与 `observation_height` 只给了一边（等于在
-                标定好的竖直视野角下改宽高比，水平视野随之改变）；或各路相机尺寸不一致。
+                标定好的竖直视野角下改宽高比，水平视野随之改变）；各路相机尺寸不一致；
+                或 `joint_unit` 不是 `"deg"` / `"rad"`。
             NotImplementedError: `obs_type` 不是支持的两个取值之一。
         """
         super().__init__()
@@ -93,6 +104,9 @@ class So101SimEnv(gym.Env):
         self.obs_type = obs_type
         self.render_mode = render_mode
         self.num_envs = num_envs
+        if joint_unit not in ("deg", "rad"):
+            raise ValueError(f"joint_unit 只能是 'deg' 或 'rad'，收到 {joint_unit!r}")
+        self.joint_unit = joint_unit
         if (observation_width is None) != (observation_height is None):
             raise ValueError(
                 "observation_width 与 observation_height 必须同时给或同时不给："
@@ -154,12 +168,21 @@ class So101SimEnv(gym.Env):
                 f"obs_type '{obs_type}' 不支持；用 'pixels' 或 'pixels_agent_pos'。"
             )
 
+        # 动作空间的界也要跟着 joint_unit 走，否则调用方按界裁剪出来的动作是另一套刻度。
         self.action_space = spaces.Box(
-            low=np.asarray(single_act.low, dtype=np.float32).reshape(-1),
-            high=np.asarray(single_act.high, dtype=np.float32).reshape(-1),
+            low=self._from_sim(np.asarray(single_act.low, dtype=np.float32).reshape(-1)),
+            high=self._from_sim(np.asarray(single_act.high, dtype=np.float32).reshape(-1)),
             shape=(self._action_dim,),
             dtype=np.float32,
         )
+
+    def _from_sim(self, x: np.ndarray) -> np.ndarray:
+        """把 ManiSkill 的弧度换成对外单位。"""
+        return np.rad2deg(x).astype(np.float32) if self.joint_unit == "deg" else x
+
+    def _to_sim(self, x: np.ndarray) -> np.ndarray:
+        """把对外单位换回 ManiSkill 的弧度。"""
+        return np.deg2rad(x).astype(np.float32) if self.joint_unit == "deg" else x
 
     def _format_raw_obs(self, raw_obs: dict) -> dict:
         """把 ManiSkill 的批量张量观测转成 lerobot 约定的 numpy 字典。
@@ -180,7 +203,7 @@ class So101SimEnv(gym.Env):
             images[name] = rgb[0] if self.num_envs == 1 else rgb
         if self.obs_type == "pixels":
             return {"pixels": images}
-        agent_pos = _to_numpy(raw_obs["agent"]["noisy_qpos"]).astype(np.float32)
+        agent_pos = self._from_sim(_to_numpy(raw_obs["agent"]["noisy_qpos"]).astype(np.float32))
         agent_pos = agent_pos[0] if self.num_envs == 1 else agent_pos
         return {"pixels": images, "agent_pos": agent_pos}
 
@@ -200,17 +223,18 @@ class So101SimEnv(gym.Env):
         return self._format_raw_obs(raw_obs), info
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict[str, Any]]:
-        """走一步。动作的语义由构造时的 `control_mode` 决定。
+        """走一步。动作的语义由构造时的 `control_mode` 决定，单位由 `joint_unit` 决定。
 
         Args:
-            action: 形状 `(dof,)`，`num_envs != 1` 时为 `(num_envs, dof)`。
+            action: 形状 `(dof,)`，`num_envs != 1` 时为 `(num_envs, dof)`；
+                单位与 `joint_unit` 一致（默认度）。
 
         Returns:
             `(观测, reward, terminated, truncated, info)`。成功即计入 `terminated`；
             单环境且本集结束时另给 `info["final_info"]`（与 lerobot 的 `LiberoEnv` 一致），
             并就地 reset 让下一集从头开始。
         """
-        act = np.asarray(action, dtype=np.float32).reshape(self.num_envs, self._action_dim)
+        act = self._to_sim(np.asarray(action, dtype=np.float32).reshape(self.num_envs, self._action_dim))
         raw_obs, reward, terminated, truncated, info = self._env.step(act)
 
         success = _to_numpy(info["success"]).reshape(self.num_envs).astype(bool)
