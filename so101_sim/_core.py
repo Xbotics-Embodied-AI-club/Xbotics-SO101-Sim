@@ -20,6 +20,7 @@ def _make_maniskill(
     domain_randomization: bool = False,
     control_mode: str | None = None,
     max_episode_steps: int | None = None,
+    sim_backend: str = "gpu",
 ):
     """构造一个原始（未包装）的批量 ManiSkill 环境，首维恒为 num_envs。
 
@@ -48,6 +49,15 @@ def _make_maniskill(
         domain_randomization: 是否开启域随机化。
         control_mode: 见上文；`None` 用机器人默认模式。
         max_episode_steps: 覆盖任务注册的单集步数上限，`None` 表示不覆盖。
+        sim_backend: 物理后端。`"gpu"` 是 GPU PhysX，`"physx_cpu"` 是 CPU PhysX。
+
+            ★**这个选择只影响算得多快，不影响子步数**（`sim_freq/control_freq` 由
+            环境声明，两边都是 4）。但它决定单环境能不能跑到 30 Hz：GPU PhysX 是为
+            几百个并行环境设计的，`num_envs=1` 时每个子步都要付一次内核启动延迟 ——
+            本机实测每控制步 47.96ms（20.9 Hz），而 CPU PhysX 是 3.24ms（308 Hz）。
+            `lerobot-record` 是墙钟驱动的，跑不到 30 Hz 就会把轨迹截断。
+            批量训练那条路（`wrappers.visual_rl_env`，几十上百个环境）反过来，
+            GPU 把启动开销摊薄了才划算，所以那侧仍用 `"gpu"`。
 
     Returns:
         未包装的批量 ManiSkill 环境。
@@ -75,7 +85,7 @@ def _make_maniskill(
         task,
         num_envs=num_envs,
         obs_mode=obs_mode,
-        sim_backend="gpu",
+        sim_backend=sim_backend,
         render_mode=render_mode,
         domain_randomization=domain_randomization,
         **kwargs,

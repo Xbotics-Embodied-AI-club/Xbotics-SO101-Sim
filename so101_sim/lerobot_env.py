@@ -58,6 +58,7 @@ class So101SimEnv(gym.Env):
         control_mode: str | None = None,
         unit_convention: str = "real",
         auto_reset: bool = True,
+        sim_backend: str = "physx_cpu",
         **kwargs,
     ):
         """建一个已注册场景的单环境视图。
@@ -96,6 +97,10 @@ class So101SimEnv(gym.Env):
             unit_convention: 状态与动作对外的口径。`"real"`（默认）= 真机口径：
                 五个臂关节度制、夹爪 0~100 行程百分比；`"maniskill"` = 原生弧度。
                 只影响 `agent_pos` 与动作，不影响画面。
+            sim_backend: 物理后端，默认 `"physx_cpu"`。本类是**单环境**入口
+                （lerobot 的 record / replay / eval 都走它），而 GPU PhysX 在
+                `num_envs=1` 下每控制步要 47.96ms（20.9 Hz）、跑不到 30 Hz，
+                CPU PhysX 是 3.24ms（308 Hz）。子步数不受影响，见 `_make_maniskill`。
             auto_reset: 本集结束时是否就地 reset。`True`（默认）满足 gym 契约，
                 `lerobot-eval` 靠它连续跑多集。**驱动机器人插件时必须给 `False`**：
                 集的边界由 `lerobot-record` / `lerobot-replay` 管，而 `terminated`
@@ -139,6 +144,7 @@ class So101SimEnv(gym.Env):
             render_mode=render_mode,
             control_mode=control_mode,
             max_episode_steps=episode_length,
+            sim_backend=sim_backend,
         )
 
         # 相机名与尺寸都从环境实际生效的配置读，不写死、也不从构造参数推：
