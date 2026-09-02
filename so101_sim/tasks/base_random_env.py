@@ -41,7 +41,7 @@ from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.articulation import Articulation
 from mani_skill.utils.structs.link import Link
-from mani_skill.utils.structs.types import SimConfig
+from mani_skill.utils.structs.types import SceneConfig, SimConfig
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.visualization.misc import tile_images
 
@@ -145,7 +145,18 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def _default_sim_config(self):
-        return SimConfig(sim_freq=100, control_freq=10)
+        # ★`contact_offset` 必须显式给 5mm，不能用 ManiSkill 的默认 20mm。
+        #   默认值是通用场景的取值，而本任务的两指净空只有 3.5mm —— 接触层比净空还厚
+        #   6 倍，合拢瞬间的预推力主导，于是**同一串动作在不同求解器上结果不同**：
+        #   默认 20mm 下同一强制初始状态，GPU 把方块抬到 0.0987m 放进箱，
+        #   CPU PhysX 把它侧向弹开 27.6mm、一次也没抬起来（8 集全灭）。
+        #   改成 5mm 后 8 集在两个后端上都抓起来，最高点差 0.1~1.9mm（7/8 集）。
+        #   再薄到 2mm 则两边都夹空 —— 接触检测赶不上，手指穿过去。
+        #
+        #   为什么这一条必须改而不是绕：数据集的内容不能依赖跑它的机器。真账 ——
+        #   同一批动作在 w2 录、拿到 w1 验只过 16/46，回 w2 又是 46/46（bd xb-uiqw）。
+        return SimConfig(sim_freq=100, control_freq=10,
+                         scene_config=SceneConfig(contact_offset=0.005))
 
     @property
     def _default_human_render_camera_configs(self):
