@@ -157,68 +157,92 @@ def test_no_train_env_module():
     assert not (Path(so101_sim.__file__).parent / "train_env.py").exists()
 
 
-@pytest.mark.parametrize(
-    ("joint_unit", "limit"),
-    [("deg", 30.0), ("rad", 3.2)],
-)
-def test_lerobot_port_joint_unit(joint_unit, limit):
-    """lerobot 评测口按 `joint_unit` 给关节角，默认那档要与已交付数据集的度制一致。
+# ─────────────────────────────────────────────────────────────────────────────
+# 评测口的口径契约：默认要与真机逐通道一致
+#
+# 真机（lerobot-record 走 so_follower）的口径是**混的**：五个臂关节是度，夹爪是
+# 0~100 行程百分比（so_follower 把 gripper 写死为 MotorNormMode.RANGE_0_100）。
+# ManiSkill 内部恒为弧度。所以这不是一个单位换算，是逐通道换算。
+#
+# 夹爪那一维尤其要有测试钉住：度数与百分比的量级恰好撞车（物理行程约 0~100 度），
+# 看数值看不出错，只表现为抓取这一环学不动。
+# ─────────────────────────────────────────────────────────────────────────────
 
-    判据用量级而不是具体数值：复位位姿会随场景调整而变，但「度」与「弧度」差 57.3 倍，
-    量级判据跨得过前者、跨不过后者。ManiSkill 内部恒为弧度，所以 `"rad"` 那档是原值。
-    """
+REAL_ARM_PEAK = 30.0      # 度制下复位位姿的臂关节峰值远超此值；弧度下远低于
+MANISKILL_ARM_PEAK = 3.2  # 弧度上限约 π
+
+
+def _make(unit_convention):
     import gymnasium as gym
-    import numpy as np
 
     import so101_sim  # noqa: F401
 
-    env = gym.make(
+    return gym.make(
         "SO101Sim-v1",
         task="SO101PickPlaceCube40-v1",
         episode_length=50,
         control_mode="pd_joint_pos",
-        joint_unit=joint_unit,
+        unit_convention=unit_convention,
     )
+
+
+def test_real_convention_arm_is_degrees_gripper_is_percent():
+    """默认口径：臂关节是度，夹爪落在 0~100 且不是角度值。"""
+    import numpy as np
+
+    env = _make("real")
     try:
         obs, _ = env.reset(seed=0)
-        peak = float(np.abs(obs["agent_pos"]).max())
-        bound = float(np.abs(env.action_space.high).max())
-        if joint_unit == "deg":
-            assert peak > limit, f"agent_pos 峰值 {peak} 不像度制"
-            assert bound > limit, f"动作空间上界 {bound} 不像度制"
-        else:
-            assert peak < limit, f"agent_pos 峰值 {peak} 不像弧度"
-            assert bound < 10.0, f"动作空间上界 {bound} 不像弧度"
+        arm = np.asarray(obs["agent_pos"])[:5]
+        grip = float(np.asarray(obs["agent_pos"])[5])
+        assert np.abs(arm).max() > REAL_ARM_PEAK, f"臂关节峰值 {np.abs(arm).max()} 不像度制"
+        assert 0.0 <= grip <= 100.0, f"夹爪 {grip} 不在行程百分比的 0~100 内"
+        # 动作空间的界也必须跟着换：夹爪那一维应当正好是 0~100
+        assert float(env.action_space.low[5]) == pytest.approx(0.0, abs=1e-3)
+        assert float(env.action_space.high[5]) == pytest.approx(100.0, abs=1e-3)
     finally:
         env.close()
 
 
-def test_lerobot_port_action_roundtrips_to_sim_radians():
-    """按度下发的动作，走完一步后关节角要停在下发的那个度数附近。
-
-    这条才是真正的判据：只验观测单位的话，动作那侧漏掉换算不会被抓到 ——
-    而漏掉动作换算恰恰是最致命的一半（度值进弧度动作空间会逐维顶到限位）。
-    """
-    import gymnasium as gym
+def test_maniskill_convention_is_untouched_radians():
+    """`"maniskill"` 那一档必须是原生弧度，六维都不换算。"""
     import numpy as np
 
-    import so101_sim  # noqa: F401
+    env = _make("maniskill")
+    try:
+        obs, _ = env.reset(seed=0)
+        pos = np.asarray(obs["agent_pos"])
+        assert np.abs(pos).max() < MANISKILL_ARM_PEAK, f"峰值 {np.abs(pos).max()} 不像弧度"
+        assert float(env.action_space.high[5]) < MANISKILL_ARM_PEAK
+    finally:
+        env.close()
 
-    env = gym.make(
-        "SO101Sim-v1",
-        task="SO101PickPlaceCube40-v1",
-        episode_length=50,
-        control_mode="pd_joint_pos",
-        joint_unit="deg",
-    )
+
+def test_action_roundtrips_through_real_convention():
+    """按真机口径下发的动作，走完几步后状态要停在下发值附近 —— 逐通道验，含夹爪。
+
+    只验观测口径的话，动作那侧漏换算不会被抓到，而那是最致命的一半：
+    臂关节会顶到限位，夹爪会张合反向。
+    """
+    import numpy as np
+
+    env = _make("real")
     try:
         start, _ = env.reset(seed=0)
         target = np.asarray(start["agent_pos"], dtype=np.float32).copy()
-        target[0] += 5.0  # 只动底座 5°，够大到能测出来，又小到一步内跟得上
+        target[0] += 5.0     # 底座 +5°
+        target[5] = 60.0     # 夹爪张到 60%
         target = np.clip(target, env.action_space.low, env.action_space.high)
-        for _ in range(10):
+        for _ in range(20):
             obs, *_ = env.step(target)
-        err = float(abs(obs["agent_pos"][0] - target[0]))
-        assert err < 2.0, f"底座停在 {obs['agent_pos'][0]}°，目标 {target[0]}°，差 {err}°"
+        got = np.asarray(obs["agent_pos"], dtype=np.float32)
+        assert abs(got[0] - target[0]) < 2.0, f"底座停在 {got[0]}°，目标 {target[0]}°"
+        assert abs(got[5] - target[5]) < 5.0, f"夹爪停在 {got[5]}%，目标 {target[5]}%"
     finally:
         env.close()
+
+
+def test_rejects_unknown_unit_convention():
+    """非法口径当场报错，不留到评测出一个低成功率再让人反推。"""
+    with pytest.raises(ValueError, match="unit_convention"):
+        _make("deg")

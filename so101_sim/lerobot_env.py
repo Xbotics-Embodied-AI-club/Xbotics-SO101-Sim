@@ -40,7 +40,7 @@ class So101SimEnv(gym.Env):
         num_envs: 底层批量份数；为 1 时对外呈现成普通单环境。
         observation_width: 实际生效的相机宽，从底层相机配置读出。
         observation_height: 实际生效的相机高，从底层相机配置读出。
-        joint_unit: 关节角对外的单位，`"deg"` 或 `"rad"`。
+        unit_convention: 状态与动作对外的口径，`"real"`（真机口径）或 `"maniskill"`（原生弧度）。
     """
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
@@ -56,7 +56,7 @@ class So101SimEnv(gym.Env):
         episode_length: int = 400,
         num_envs: int = 1,
         control_mode: str | None = None,
-        joint_unit: str = "deg",
+        unit_convention: str = "real",
         **kwargs,
     ):
         """建一个已注册场景的单环境视图。
@@ -69,11 +69,15 @@ class So101SimEnv(gym.Env):
           手臂以包线最大速度朝错误方向走。
         - `episode_length`：要装得下数据集里的轨迹长度。三个分发任务注册的是 400 步，
           够装脚本化产线的轨迹（中位 368 帧），但装不下更长的。
-        - `joint_unit`：ManiSkill 内部一律弧度，而**已交付的仿真与真机数据集一律度制**
-          （真机舵机就按度读写，仿真数据产线在落盘时换算过）。本入口是给 lerobot 策略
-          评测用的，策略说什么单位由它训练的数据决定 ⇒ 默认 `"deg"`。留 `"rad"` 是给
-          直接对着 ManiSkill 原生口径写的调用方。差 57.3 倍：观测偏小 57.3 倍会让归一化
-          输出远离训练分布，动作偏大 57.3 倍会逐维顶到关节限位。
+        - `unit_convention`：ManiSkill 内部一律弧度，而真机（`lerobot-record` 走
+          `so_follower`）的口径是**混的** —— 五个臂关节是度，**夹爪是 0~100 的行程
+          百分比**（`so_follower` 把 gripper 写死为 `MotorNormMode.RANGE_0_100`，
+          与 `use_degrees` 无关）。所以「统一到真机」不是一个单位换算，是逐通道换算。
+          默认 `"real"`；`"maniskill"` 保持原生弧度，给直接对着 ManiSkill 写的调用方。
+
+          配错的代价：臂关节差 57.3 倍 —— 观测偏小会让归一化输出远离训练分布，动作
+          偏大会逐维顶到关节限位。夹爪那一维更隐蔽：度数与百分比的**量级恰好撞车**
+          （物理行程约 0~100 度），所以看数值看不出来，只表现为抓取这一环学不动。
 
         Args:
             task: 已注册的环境 id（三个分发场景之一）。
@@ -88,15 +92,15 @@ class So101SimEnv(gym.Env):
                 注册值的话，超长行为会被 ManiSkill 的 TimeLimit 截断而评测端看不出来。
             num_envs: 底层批量份数。
             control_mode: 动作语义。`None` 用机器人默认模式。
-            joint_unit: 关节角对外的单位。`"deg"`（默认）与已交付数据集一致；
-                `"rad"` 是 ManiSkill 的原生口径。只影响 `agent_pos` 与动作，
-                不影响画面。
+            unit_convention: 状态与动作对外的口径。`"real"`（默认）= 真机口径：
+                五个臂关节度制、夹爪 0~100 行程百分比；`"maniskill"` = 原生弧度。
+                只影响 `agent_pos` 与动作，不影响画面。
             **kwargs: 忽略，容纳 lerobot 传来的其它环境参数。
 
         Raises:
             ValueError: `observation_width` 与 `observation_height` 只给了一边（等于在
                 标定好的竖直视野角下改宽高比，水平视野随之改变）；各路相机尺寸不一致；
-                或 `joint_unit` 不是 `"deg"` / `"rad"`。
+                或 `unit_convention` 不是 `"real"` / `"maniskill"`。
             NotImplementedError: `obs_type` 不是支持的两个取值之一。
         """
         super().__init__()
@@ -104,9 +108,11 @@ class So101SimEnv(gym.Env):
         self.obs_type = obs_type
         self.render_mode = render_mode
         self.num_envs = num_envs
-        if joint_unit not in ("deg", "rad"):
-            raise ValueError(f"joint_unit 只能是 'deg' 或 'rad'，收到 {joint_unit!r}")
-        self.joint_unit = joint_unit
+        if unit_convention not in ("real", "maniskill"):
+            raise ValueError(
+                f"unit_convention 只能是 'real' 或 'maniskill'，收到 {unit_convention!r}"
+            )
+        self.unit_convention = unit_convention
         if (observation_width is None) != (observation_height is None):
             raise ValueError(
                 "observation_width 与 observation_height 必须同时给或同时不给："
@@ -168,7 +174,18 @@ class So101SimEnv(gym.Env):
                 f"obs_type '{obs_type}' 不支持；用 'pixels' 或 'pixels_agent_pos'。"
             )
 
-        # 动作空间的界也要跟着 joint_unit 走，否则调用方按界裁剪出来的动作是另一套刻度。
+        # 夹爪的百分比映射用**底层关节自己的限位**算，不写死数字 ——
+        # URDF 换了限位，这里必须跟着换，而写死的常数不会跟着换也不会报错。
+        gripper = self._env.unwrapped.agent.robot.active_joints[self._gripper_index]
+        if "gripper" not in gripper.name:
+            raise ValueError(
+                f"最后一个关节是 {gripper.name!r}，不是夹爪 —— 夹爪的百分比映射按「最后一维」"
+                "取，关节顺序变了必须当场停下，否则会把某个臂关节当成夹爪换算。"
+            )
+        limits = np.asarray(gripper.limits.cpu()).reshape(-1)[:2]
+        self._gripper_rad_lo, self._gripper_rad_hi = float(limits[0]), float(limits[1])
+
+        # 动作空间的界也要跟着口径走，否则调用方按界裁剪出来的动作是另一套刻度。
         self.action_space = spaces.Box(
             low=self._from_sim(np.asarray(single_act.low, dtype=np.float32).reshape(-1)),
             high=self._from_sim(np.asarray(single_act.high, dtype=np.float32).reshape(-1)),
@@ -176,13 +193,31 @@ class So101SimEnv(gym.Env):
             dtype=np.float32,
         )
 
+    # 真机口径下夹爪是行程百分比而不是角度 —— `so_follower` 把 gripper 写死为
+    # `MotorNormMode.RANGE_0_100`，与 `use_degrees` 无关。夹爪恒为最后一维。
+    _gripper_index = -1
+
     def _from_sim(self, x: np.ndarray) -> np.ndarray:
-        """把 ManiSkill 的弧度换成对外单位。"""
-        return np.rad2deg(x).astype(np.float32) if self.joint_unit == "deg" else x
+        """把 ManiSkill 的弧度换成对外口径（臂关节→度，夹爪→行程百分比）。"""
+        if self.unit_convention != "real":
+            return x
+        out = np.rad2deg(np.asarray(x, dtype=np.float32))
+        span = self._gripper_rad_hi - self._gripper_rad_lo
+        pct = (np.asarray(x, dtype=np.float32)[..., self._gripper_index]
+               - self._gripper_rad_lo) / span * 100.0
+        out[..., self._gripper_index] = pct
+        return out.astype(np.float32)
 
     def _to_sim(self, x: np.ndarray) -> np.ndarray:
-        """把对外单位换回 ManiSkill 的弧度。"""
-        return np.deg2rad(x).astype(np.float32) if self.joint_unit == "deg" else x
+        """把对外口径换回 ManiSkill 的弧度（`_from_sim` 的逆）。"""
+        if self.unit_convention != "real":
+            return x
+        out = np.deg2rad(np.asarray(x, dtype=np.float32))
+        span = self._gripper_rad_hi - self._gripper_rad_lo
+        rad = (np.asarray(x, dtype=np.float32)[..., self._gripper_index] / 100.0 * span
+               + self._gripper_rad_lo)
+        out[..., self._gripper_index] = rad
+        return out.astype(np.float32)
 
     def _format_raw_obs(self, raw_obs: dict) -> dict:
         """把 ManiSkill 的批量张量观测转成 lerobot 约定的 numpy 字典。
@@ -223,11 +258,11 @@ class So101SimEnv(gym.Env):
         return self._format_raw_obs(raw_obs), info
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict[str, Any]]:
-        """走一步。动作的语义由构造时的 `control_mode` 决定，单位由 `joint_unit` 决定。
+        """走一步。动作的语义由 `control_mode` 决定，口径由 `unit_convention` 决定。
 
         Args:
             action: 形状 `(dof,)`，`num_envs != 1` 时为 `(num_envs, dof)`；
-                单位与 `joint_unit` 一致（默认度）。
+                口径与 `unit_convention` 一致（默认真机口径：臂关节度、夹爪百分比）。
 
         Returns:
             `(观测, reward, terminated, truncated, info)`。成功即计入 `terminated`；
