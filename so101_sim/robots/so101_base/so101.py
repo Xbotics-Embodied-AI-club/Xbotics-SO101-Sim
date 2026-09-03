@@ -9,6 +9,7 @@
 """
 
 import copy
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import sapien
@@ -24,20 +25,51 @@ from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
 from pathlib import Path
 
-# 真机开机位姿（度制），与两份真机数据集的首帧中位逐关节吻合 ——
-# 已发布的演示每一集第 0 帧都精确等于它，逐位标准差 0.000。
-# 值按本模块那套几何的关节约定给，与限位同源。换成别的起始位形，策略从没见过的
-# 位姿起步，实测同一份权重成功率 0/20 → 9/10。取值与消融见 bd xb-1sc2。
-REAL_HOME_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53, 1.90]
+_URDF_PATH = str(Path(__file__).parent.parent / "kit_assets" / "kit_v1_so101.urdf")
+
+
+def gripper_limit_rad():
+    """夹爪关节的限位（弧度），从 URDF 现读。
+
+    Returns:
+        `(下限, 上限)`。
+
+    Raises:
+        ValueError: URDF 里没有名为 `gripper` 的关节或它没有限位。
+
+    夹爪的 0~100 行程百分比就是按这个区间定义的（`lerobot_env` 里换算观测时同样从
+    这里现读），所以两处不许各抄一份数 —— 换 URDF 时只有这一处要跟着变。
+    """
+    for joint in ET.parse(_URDF_PATH).getroot().iter("joint"):
+        if joint.get("name") == "gripper":
+            limit = joint.find("limit")
+            if limit is not None:
+                return float(limit.get("lower")), float(limit.get("upper"))
+    raise ValueError(f"{_URDF_PATH} 里读不到 gripper 关节的限位")
+
+
+# 真机开机位姿，与两份真机数据集的首帧中位逐关节吻合（实测全量 300 集，逐维差 ≤0.005）。
+# 换成别的起始位形，策略从没见过的位姿起步，实测同一份权重成功率 0/20 → 9/10。
+#
+# ★ 臂关节与夹爪**不是同一个量纲**，所以分成两个常量：lerobot 的 `so_follower` 把
+#   gripper 写死成 `MotorNormMode.RANGE_0_100`，只有臂五关节走度制 ⇒ 真机数据里夹爪
+#   那一列是行程百分比。曾把六个值放在一个列表里一律 `np.radians()`，于是百分比被当成
+#   角度：仿真 home 夹爪读 10.818 而真机读 1.896，两侧闭合端取值区间完全不重叠 ——
+#   混训时同一个物理状态在两份数据里是两个不同的数。
+REAL_HOME_ARM_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53]
+REAL_HOME_GRIPPER_PCT = 1.90
 
 
 def kit_rest_qpos():
     """起始位姿的弧度形式。
 
     Returns:
-        六个关节角（弧度），即 `REAL_HOME_DEG` 的弧度形式。
+        六个关节角（弧度）：前五维由度换算，夹爪由行程百分比按 URDF 限位换算。
     """
-    return np.radians(REAL_HOME_DEG).tolist()
+    lo, hi = gripper_limit_rad()
+    return np.radians(REAL_HOME_ARM_DEG).tolist() + [
+        lo + REAL_HOME_GRIPPER_PCT / 100.0 * (hi - lo)
+    ]
 
 
 # ── 关掉 4 对**假**自碰撞 ──────────────────────────────────────────────────
@@ -76,11 +108,7 @@ class SO101(BaseAgent):
     uid = "so101"
 
     # 唯一的那份几何：真机套件版，随包自包含，见 `robots/kit_assets/`。
-    urdf_path = str(
-        Path(__file__).parent.parent
-        / "kit_assets"
-        / "kit_v1_so101.urdf"
-    )
+    urdf_path = _URDF_PATH
     urdf_config = dict(
         _materials=dict(
             gripper=dict(static_friction=2.0, dynamic_friction=2.0, restitution=0.0)  

@@ -72,11 +72,19 @@ TABLE_COLOR = (0.9, 0.9, 0.9, 1.0)
 # top 相机相对挂载光学系的位置微调（米，光学系 x 右 / y 下 / z 前）。标定视角与真机对齐后
 # 定死；(0,0,0) 表示完全用 URDF 里标定的挂载位姿。
 TOP_CAMERA_OFFSET = (0.0, 0.0, 0.0)
-# top 相机额外俯仰（度，绕光学系 x 轴=画面水平轴；正=镜头更朝下）。
-# URDF 的挂载位姿是 KIT 设计值；真机 task1 那套 rig 的实际装法与设计值有差，
-# 而标定板只能标 wrist（eye-in-hand）、标不了 top（eye-to-hand），只能靠画面反解。
-# 0 = 完全用 URDF 设计位姿。
-TOP_CAMERA_EXTRA_PITCH_DEG = 0.0
+# top 相机相对 URDF 挂载位姿的额外朝向修正（度）。
+#
+# URDF 的挂载位姿是 KIT 设计值；真机 task1 那套 rig 的实际装法与设计值有差，而标定板只能
+# 标 wrist（eye-in-hand）、标不了 top（eye-to-hand），只能靠画面反解。0 = 完全用设计位姿。
+#
+# 两个角都在**相机自身系**里右乘（x 前 / y 左 / z 上）：俯仰绕 y，偏航绕 z。
+# 取值靠画面反解：把一集的逐像素中位图（手臂被平均掉，只剩台面与底座这些不动的结构）
+# 与真机同一集的中位图做归一化互相关，峰值位置就是仿真画面要平移多少像素；再按标定的
+# 竖直 FOV 折算成角度 —— 焦距 = (高/2)/tan(fovy/2)，角度 = atan(平移像素 / 焦距)。
+# 实测两集一致：要把仿真画面右移 37±1 px、下移 22 px，相关从 0.59 升到 0.75，
+# 且画面底部那条真机没有的台面边正好被推出画外。
+TOP_CAMERA_EXTRA_PITCH_DEG = -2.98
+TOP_CAMERA_EXTRA_YAW_DEG = 5.14
 
 
 def _paint_actor(actor, rgba):
@@ -249,12 +257,14 @@ class KitDualCameraMixin:
             `top` 与 `wrist` 两个 `CameraConfig`，各自挂在 KIT URDF 的光学系 link 上。
         """
         conv = sapien.Pose(q=_OPTICAL_CONV)
-        # 额外俯仰绕的是 **y** 轴：实测在 `_OPTICAL_CONV` 之后右乘绕 y 的旋转，+10° 恰好让
-        # 俯视角 67.5°→77.5°；绕 x 无效果，绕 z 只产生 −2° 的耦合，都不是俯仰轴。
-        half = np.deg2rad(TOP_CAMERA_EXTRA_PITCH_DEG) / 2
-        pitch_q = [np.cos(half), 0.0, np.sin(half), 0.0]
+        # 两个修正角都在**相机自身系**里右乘（x 前 / y 左 / z 上）：俯仰绕 y、偏航绕 z。
+        # 绕 x 是滚转，对画面平移没有贡献，所以没有这个旋钮。
+        pitch_half = np.deg2rad(TOP_CAMERA_EXTRA_PITCH_DEG) / 2
+        yaw_half = np.deg2rad(TOP_CAMERA_EXTRA_YAW_DEG) / 2
+        aim_q = qmult([np.cos(yaw_half), 0.0, 0.0, np.sin(yaw_half)],
+                      [np.cos(pitch_half), 0.0, np.sin(pitch_half), 0.0])
         top_pose = sapien.Pose(p=list(TOP_CAMERA_OFFSET),
-                               q=list(qmult(_OPTICAL_CONV, pitch_q)))
+                               q=list(qmult(_OPTICAL_CONV, aim_q)))
         links = self.agent.robot.links_map
         return [
             CameraConfig(
