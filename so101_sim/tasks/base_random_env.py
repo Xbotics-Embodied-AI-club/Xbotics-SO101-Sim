@@ -45,8 +45,6 @@ from mani_skill.utils.structs.types import SceneConfig, SimConfig
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.visualization.misc import tile_images
 
-from transforms3d.euler import euler2quat
-from transforms3d.quaternions import qmult
 
 
 @dataclass
@@ -165,12 +163,8 @@ class BaseRandomEnv(BaseEnv):
 
     @property
     def apply_greenscreen(self) -> bool:
-        """Backward-compatible alias for apply_overlay."""
+        """Whether the overlay background is composited in (the only place asking this)."""
         return self.domain_randomization_config.apply_overlay
-
-    def _load_scene(self, options: dict):
-        """Initialize scene. Subclasses should call super()._load_scene() first."""
-        self._objects_to_remove_from_greenscreen = []
 
     def _load_lighting(self, options: dict):
         """Load scene lighting with optional randomization."""

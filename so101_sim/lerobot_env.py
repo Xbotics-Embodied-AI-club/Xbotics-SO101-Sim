@@ -249,7 +249,9 @@ class So101SimEnv(gym.Env):
         """把 ManiSkill 的批量张量观测转成 lerobot 约定的 numpy 字典。
 
         ManiSkill 那侧的键是 `sensor_data.<相机名>.rgb`（N,H,W,3）与
-        `agent.noisy_qpos`（N,dof）—— 用带噪版 qpos，与真机读数一样有测量噪声。
+        `agent.noisy_qpos`（N,dof）。键名沿用上游，但**这条路径上它就是干净 qpos** ——
+        噪声只在 `domain_randomization` 为真时加（`place.py` 的 `_get_obs_agent`），
+        而本入口从不打开它。要评噪声鲁棒性得另开域随机化，不能靠这个键名。
 
         Args:
             raw_obs: ManiSkill 的原始观测字典。

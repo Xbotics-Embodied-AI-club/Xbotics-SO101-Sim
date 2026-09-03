@@ -7,12 +7,14 @@
 - `<name>_collision.obj`：凸包碰撞网格（sapien/PhysX 只吃凸体；bin 这类内凹件先用凸包，
   真正做"放进 bin"的凹腔碰撞是后续任务的事）。
 
-文件名编码信息：末尾 `#RRGGBB` 是颜色，`_N`（如 `cube_4`）是尺寸档（厘米）。产物落
-同目录 `kit_assets/objects/`，随包自包含。
+文件名编码信息：`#RRGGBB` 是颜色（在文件名任意位置，取不到一律回落黑色）；方块与圆柱的
+`_N`（如 `cube_4`）是边长/直径档，单位厘米，而 `bin_2` 的 `_2` 是版本号不是尺寸
+（它实测 80×100×30 mm）。产物落同目录 `kit_assets/objects/`，随包自包含。
 
-**这是一次性资产工具，不在安装后的运行路径上。** 输入的 STEP 原件**不随本包分发**，
-`SRC` 指向的是当初转换时的仓库外位置；产物已经在 `kit_assets/objects/` 里，
-所以正常使用本包时不需要跑它。要重新转换就先把 STEP 放到 `SRC` 指的位置。
+**这是一次性资产工具，不在安装后的运行路径上。** 输入的 STEP 原件**不随本包分发** ——
+它们在讲义仓 `handbook/code/assets/objects/`，本包是独立 submodule，只在源码检出布局下
+够得着。产物已经在 `kit_assets/objects/` 里，所以正常使用本包时不需要跑它；
+`SRC` 不存在时 `convert_all()` 会把路径打出来并抛 `FileNotFoundError`。
 """
 
 import re
@@ -21,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-SRC = Path(__file__).resolve().parents[4] / "assets" / "objects"
+SRC = Path(__file__).resolve().parents[4] / "handbook" / "code" / "assets" / "objects"
 DST = Path(__file__).parent / "kit_assets" / "objects"
 
 

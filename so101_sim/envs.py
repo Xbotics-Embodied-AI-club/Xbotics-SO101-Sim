@@ -6,13 +6,14 @@
 - **top**：绑在 URDF 的 `top_camera_optical_frame`（挂在 base_link 上，随支架固定俯视全局）。
 - **wrist**：绑在 `wrist_camera_optical_frame`（挂在 gripper_link 上，随夹爪动、看被抓物）。
 
-两个光学系的位姿已由真机标定写进 KIT URDF，无需 look_at 手调。唯一要补的是 **ROS 光学系
-（z 前 / x 右 / y 下）→ SAPIEN 相机系（x 前 / y 左 / z 上）** 的固定旋转，写成常量四元数
-`_ROS_OPTICAL_TO_SAPIEN` 挂在相机的相对位姿上。
+两个光学系的位姿已由真机标定写进 KIT URDF，无需 look_at 手调。挂在相机相对位姿上的是
+`_OPTICAL_CONV` —— 它是两个旋转的合成：**ROS 光学系（z 前 / x 右 / y 下）→ SAPIEN 相机系
+（x 前 / y 左 / z 上）** 的标准转换 `_ROS_OPTICAL_TO_SAPIEN`，再乘一个绕光轴的 180°
+（`_ROLL_180`，修 URDF 里光学系不按 ROS 约定摆这件事）。
 
 任务语义沿用 tasks/place.py 的 Place（放入料盒才算成功）：本文件只换机器人 + 相机，
-不改任务逻辑。so101_kit 与 vendored so101 同构（同 6 个活动关节），故基座朝向与 rest qpos
-沿用 so101。
+不改任务逻辑。本包只有一份机器人几何（`kit_v1_so101.urdf`），`so101` 与 `so101_kit_slow`
+共用它、区别只在控制器包线，所以基座朝向与 rest qpos 两个 uid 通用。
 """
 
 import re
@@ -33,7 +34,8 @@ from so101_sim.tasks.place import Place
 
 from so101_sim.robots.so101_kit_slow import ITEM_FRICTION_RANGE, SIM_FPS
 
-# 真机 KIT 演示套件的物体 mesh（由 assets/objects 的 STEP 用 convert_step.py 转出）。
+# 真机 KIT 演示套件的物体 mesh（由讲义仓 `handbook/code/assets/objects/` 的 STEP
+# 用 `robots/convert_step.py` 转出，产物随包分发、STEP 原件不随包）。
 _OBJECTS_DIR = Path(__file__).resolve().parent / "robots" / "kit_assets" / "objects"
 
 # ROS 光学系 → SAPIEN 相机系的固定旋转（wxyz）：
@@ -299,10 +301,24 @@ def _cube_size_config(mesh_name):
 
 
 def _cylinder_size_config(mesh_name):
-    """把 STEP 圆柱的真实直径/高与密度钉成 squint 的 can 区间。"""
+    """把 STEP 圆柱的真实直径/高与密度钉成 squint 的 can 区间。
+
+    Args:
+        mesh_name: `mesh_full_size` 认的件名。
+
+    Returns:
+        squint 的 can 尺寸配置字典。
+
+    Raises:
+        ValueError: 横截面不是圆 —— 那说明这个件的建模轴不是 y，按 y 取高会取错。
+    """
     ext = mesh_full_size(mesh_name)
+    # 建模轴沿 y（见 `_swap_visual_to_mesh` 的 `mesh_rotation` 说明），所以 x/z 是直径、y 是高。
+    # cube_4 沿 z 而 cylinder_4 沿 y，STEP 各件不统一，取错轴时尺寸会静默变成另一个数。
+    if abs(float(ext[0]) - float(ext[2])) > 1e-3:
+        raise ValueError(f"{mesh_name} 的横截面不是圆：x={ext[0]:.5f} z={ext[2]:.5f}")
     half_radius = float(ext[0]) / 2
-    half_height = float(ext[2]) / 2
+    half_height = float(ext[1]) / 2
     return {"can_radius_range": (half_radius, half_radius),
             "can_half_height_range": (half_height, half_height),
             "item_density_range": (ITEM_DENSITY, ITEM_DENSITY)}
@@ -761,8 +777,8 @@ class SlowRobotMixin:
     def _default_sim_config(self):
         """把控制频率提到 30Hz 对齐真机 task1。
 
-        ★`control_freq` 不是构造参数，走 `SimConfig`；且 **`sim_freq` 必须能整除
-        `control_freq`**（`sapien_env` 里有 assert）。默认 `sim_freq=100` 除不尽 30，
+        ★`control_freq` 不是构造参数，走 `SimConfig`；且 **`control_freq` 必须整除
+        `sim_freq`**（`sapien_env` 里有 assert）。默认 `sim_freq=100` 除不尽 30，
         故同时把 `sim_freq` 提到 120（每个控制步 4 个物理子步，物理步长 1/120s）。
         """
         cfg = super()._default_sim_config
@@ -815,8 +831,9 @@ class KitSlowMixin(SlowRobotMixin, KitDualCameraMixin):
 # 带完整双相机（top + wrist），**录制与渲染共用它** —— 于是不存在「孪生环境是否逐字同构」
 # 这种要另外验的风险。
 #
-# 成功判据用 squint 原逻辑：物体落在料箱 x/y 范围内 ∧ 夹爪已松开 ∧ 物体静止 ∧ 机器人静止。
-# 也就是「东西真进箱了、手真放开了、都停稳了」—— 这个用画面自证，比在腕部视角里辨接触可靠。
+# 成功判据用 squint 原逻辑，四条的合取（`place.py` 的 `evaluate`）：物体落在料箱 x/y 范围内
+# ∧ 手臂不碰物体 ∧ 手臂不碰料箱 ∧ 机器人静止。**不含"物体静止"** —— `is_item_static` 算了
+# 但没进 `success`。也就是「东西进箱了、手撤开了、臂停稳了」，用画面自证比在腕部视角里辨接触可靠。
 #
 # 三个场景共用 `bin_2` 料箱（80×100×30 mm，与 STEP 包围盒逐字一致，所以不覆盖 bin 尺寸）；
 # 物体碰撞尺寸钉到各自 STEP 真值，不随机。

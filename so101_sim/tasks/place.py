@@ -1,5 +1,5 @@
-from dataclasses import asdict, dataclass
-from typing import Any, Optional, Sequence, Union
+from dataclasses import dataclass
+from typing import Any, Sequence, Union
 
 import dacite
 import numpy as np
@@ -9,7 +9,6 @@ from transforms3d.euler import euler2quat
 
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.utils import common
-from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs.pose import Pose
@@ -422,12 +421,19 @@ class Place(DefaultCameraEnv):
 
     def evaluate(self):
         item_pos = self.item.pose.p
-        bin_pos = self.bin.pose.p.clone()
-        bin_pos[:, 2] = self.bin_thickness + self.item_half_sizes
+        offset = item_pos - self.bin.pose.p
 
-        offset = item_pos - bin_pos
-        inside_x = torch.abs(offset[:, 0]) < self.bin_half_sizes_x
-        inside_y = torch.abs(offset[:, 1]) < self.bin_half_sizes_y
+        # 料箱每集被随机绕 z 转一个角（`_initialize_episode` 给它随机四元数），而开口是
+        # 长方形、两边差 25% ⇒ 必须把偏移转进**料箱自己的坐标系**再比半尺寸。按世界轴比
+        # 会在箱口边界附近判反：偏航 6° 时角点误差约 5mm，物体明明在箱外却判成功。
+        # 偏航只锁在 z 上（`lock_x` / `lock_y`），所以从四元数的 (w, z) 就能解出来。
+        quat = self.bin.pose.q
+        yaw = 2.0 * torch.atan2(quat[:, 3], quat[:, 0])
+        cos, sin = torch.cos(-yaw), torch.sin(-yaw)
+        local_x = cos * offset[:, 0] - sin * offset[:, 1]
+        local_y = sin * offset[:, 0] + cos * offset[:, 1]
+        inside_x = torch.abs(local_x) < self.bin_half_sizes_x
+        inside_y = torch.abs(local_y) < self.bin_half_sizes_y
         is_item_above_bin = inside_x & inside_y
 
         item_lifted = self.item.pose.p[..., -1] >= (self.item_half_sizes + 1e-3)

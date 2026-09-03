@@ -9,10 +9,9 @@
 """
 
 import copy
-import os
 
 import numpy as np
-from mani_skill.agents.controllers import PDJointPosControllerConfig, deepcopy_dict
+from mani_skill.agents.controllers import deepcopy_dict
 from mani_skill.agents.registration import register_agent
 
 from so101_sim.robots.so101_base.so101 import SO101
@@ -79,24 +78,19 @@ class SlowControllerMixin:
 # 靠几何卡住，策略学不到捏紧 ⇒ 提到 0.8–1.0。
 # ⚠️ 这是**物理假设、非实测** —— 有真机件材质配对的实测值就换成它。
 #
-# `GRASP_MIN_FORCE` 保持 squint 默认 0.5 N：`is_item_grasped` 只进 reward、不进 success 判据，
-# 提高它不收紧成功门槛，只让「抓住」这个 reward 闸门更难触发。消融账见 bd xb-01ck。
-ITEM_FRICTION_RANGE = tuple(
-    float(x) for x in os.environ.get("SO101_ITEM_FRICTION", "0.8,1.0").split(","))
-GRASP_MIN_FORCE = float(os.environ.get("SO101_GRASP_MIN_FORCE", "0.5"))
+# ★写死在这里，不从环境变量取。它是物理参数，**换个值就是另一份数据**；走环境变量时
+#   "这批数据是按哪套摩擦产的"只存在于当时那条命令里，而同一份代码在两台机器上会产出
+#   不同的数据，且两边都不报错。
+ITEM_FRICTION_RANGE = (0.8, 1.0)
 
-
-class FirmGraspMixin:
-    """把 `is_grasping` 的力门槛提高，使"轻贴"不再算抓住。"""
-
-    def is_grasping(self, object, min_force=None, max_angle=110):
-        return super().is_grasping(object,
-                                   min_force=GRASP_MIN_FORCE if min_force is None else min_force,
-                                   max_angle=max_angle)
+# 抓取力门槛沿用 `SO101.is_grasping` 的默认 0.5 N，本模块不覆盖它。
+# 这里曾有一个 `FirmGraspMixin`，声称"把门槛提高、使轻贴不再算抓住"，而它传下去的
+# min_force 与父类默认值逐字相同 —— 一个什么都没改的 mixin，却让读的人以为判据已经从严。
+# 真要改门槛就改 `so101.py` 里那个默认值，只有那一处。
 
 
 @register_agent()
-class SO101KitSlow(FirmGraspMixin, SlowControllerMixin, SO101):
-    """SO-101，动作空间压在真机速度包线内，抓取判据从严。"""
+class SO101KitSlow(SlowControllerMixin, SO101):
+    """SO-101，动作空间压在真机速度包线内。"""
 
     uid = "so101_kit_slow"
