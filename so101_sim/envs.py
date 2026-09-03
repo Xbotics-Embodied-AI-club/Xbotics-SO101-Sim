@@ -69,26 +69,23 @@ WRIST_CAMERA_FOV = CAMERA_FOV
 ROBOT_COLOR = (0.05, 0.05, 0.05)
 TABLE_COLOR = (0.9, 0.9, 0.9, 1.0)
 
-# top 相机相对挂载光学系的位置微调（米，光学系 x 右 / y 下 / z 前）。标定视角与真机对齐后
-# 定死；(0,0,0) 表示完全用 URDF 里标定的挂载位姿。
-TOP_CAMERA_OFFSET = (0.0, 0.0, 0.0)
-# top 相机相对 URDF 挂载位姿的额外朝向修正（度）。
+# top 相机相对 URDF 挂载光学系的位置修正（米，光学系 x 右 / y 下 / z 前）。
 #
 # URDF 的挂载位姿是 KIT 设计值；真机 task1 那套 rig 的实际装法与设计值有差，而标定板只能
-# 标 wrist（eye-in-hand）、标不了 top（eye-to-hand），只能靠画面反解。0 = 完全用设计位姿。
+# 标 wrist（eye-in-hand）、标不了 top（eye-to-hand），只能靠画面反解。(0,0,0) = 用设计位姿。
 #
-# 两个角都在**相机自身系**里右乘（x 前 / y 左 / z 上）：俯仰绕 y，偏航绕 z。
+# ★**只许平移，不许旋转。** 转相机也能让画面对上（实测把互相关从 0.593 提到 0.735），
+#   但同时给投影引入 keystone —— 原本与像轴平行的直线会变斜，仿真的成像就不再与真机
+#   是同一个投影。平移只改视差、不改光轴朝向，投影保持平行。所以这里没有俯仰/偏航旋钮：
+#   留着一个必须永远为 0 的旋钮本身就是陷阱。
 #
 # 取值靠画面反解，不靠公式算：把一集的逐像素中位图（手臂被平均掉，只剩台面与底座这些
 # 不动的结构）与真机同一集的中位图做归一化互相关，峰值位置就是仿真画面还差多少像素。
 # 修正前实测两集一致：要把仿真画面右移 37±1 px、下移 22 px（未平移相关 0.59）。
-#
-# 折算成角度只是一阶估计 —— 相机离场景半米，绕自身轴转还带视差平移，两个角合成后也不
-# 完全正交（实测偏航 9.3 px/度、俯仰 13.8 px/度，都大于按 fovy 折算的 7.4）。所以定稿值
-# 是扫描出来的：三集（ep0/120/250）一致给出残差 dy=+6、|dx|≤4，未平移相关升到 0.72~0.74。
-# ⚠️ 相关面在 dy 上有两个相距约 16 px 的局部峰（多半来自台面那条横边），别对着单集细调。
-TOP_CAMERA_EXTRA_PITCH_DEG = -1.90
-TOP_CAMERA_EXTRA_YAW_DEG = 4.40
+# 位移到像素的换算依赖景深（shift_px = offset_m * f / Z，f = (480/2)/tan(fovy/2) = 422.8 px，
+# 台面到相机约 0.54 m ⇒ 约 780 px/m），所以定稿值同样是扫描出来的，见
+# `experiment_main_v1/scripts/EAI-exp-002/measure_top_offset.py`。
+TOP_CAMERA_OFFSET = (0.0, 0.0, 0.0)
 
 
 def _paint_actor(actor, rgba):
@@ -260,15 +257,10 @@ class KitDualCameraMixin:
         Returns:
             `top` 与 `wrist` 两个 `CameraConfig`，各自挂在 KIT URDF 的光学系 link 上。
         """
+        # 两路相机的朝向都只有光学系约定那一个旋转，**不额外转** —— top 与真机的偏差
+        # 用 `TOP_CAMERA_OFFSET` 平移修，转相机会让投影 keystone、不再与真机平行。
         conv = sapien.Pose(q=_OPTICAL_CONV)
-        # 两个修正角都在**相机自身系**里右乘（x 前 / y 左 / z 上）：俯仰绕 y、偏航绕 z。
-        # 绕 x 是滚转，对画面平移没有贡献，所以没有这个旋钮。
-        pitch_half = np.deg2rad(TOP_CAMERA_EXTRA_PITCH_DEG) / 2
-        yaw_half = np.deg2rad(TOP_CAMERA_EXTRA_YAW_DEG) / 2
-        aim_q = qmult([np.cos(yaw_half), 0.0, 0.0, np.sin(yaw_half)],
-                      [np.cos(pitch_half), 0.0, np.sin(pitch_half), 0.0])
-        top_pose = sapien.Pose(p=list(TOP_CAMERA_OFFSET),
-                               q=list(qmult(_OPTICAL_CONV, aim_q)))
+        top_pose = sapien.Pose(p=list(TOP_CAMERA_OFFSET), q=_OPTICAL_CONV)
         links = self.agent.robot.links_map
         return [
             CameraConfig(
