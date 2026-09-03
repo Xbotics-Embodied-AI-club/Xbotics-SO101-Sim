@@ -34,7 +34,21 @@ class SO101SimRobot(Robot):
     """一台由仿真扮演的 SO-101，`get_observation` / `send_action` 与真机同形。"""
 
     config_class = SO101SimRobotConfig
-    name = "so101_sim"
+    # ★`name` 决定写进数据集的 `robot_type`（`Robot.__init__` 里 `self.robot_type = self.name`），
+    #   与 `--robot.type` 的选择器**是两件事** —— lerobot 自己就是这么分的：
+    #   `config_so_follower.py` 把同一个配置类注册成 `so101_follower` 与 `so100_follower`
+    #   两个选择器，而 `SOFollower.name = "so_follower"`，两个选择器共用一个 `robot_type`。
+    #
+    #   所以这里取真机那个值：
+    #     · 调用时怎么区分 → `--robot.type=so101_sim`（选择器，一直是分开的）
+    #     · 数据里怎么记   → `robot_type=so_follower`，与真机逐字相同
+    #
+    #   为什么必须相同：官方合并的第一步 `validate_all_metadata`（aggregate.py:73）
+    #   **逐字比 robot_type**，不等就 `raise ValueError` —— 仿真与真机就合不成一份
+    #   训练集，而 `lerobot-train` 又只吃单一 repo_id。
+    #   数据是仿真产的这件事由别处标着：目录名 `so101_sim_regen`、`repo_id`、
+    #   任务描述、发布仓名 —— 都不必占用 `robot_type` 这个要参与合并校验的字段。
+    name = "so_follower"
 
     def __init__(self, config: SO101SimRobotConfig):
         super().__init__(config)
