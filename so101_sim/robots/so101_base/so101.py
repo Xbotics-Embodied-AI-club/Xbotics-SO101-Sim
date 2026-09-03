@@ -48,7 +48,11 @@ def gripper_limit_rad():
     raise ValueError(f"{_URDF_PATH} 里读不到 gripper 关节的限位")
 
 
-# 真机开机位姿，与两份真机数据集的首帧中位逐关节吻合（实测全量 300 集，逐维差 ≤0.005）。
+# 真机开机位姿。判据是**落在真机各源的 home 区间内且靠近中位**，不是"与某一份逐维吻合"
+# —— modelscope 那 9 份真机数据集的 home 彼此就差很多（实测各源 ep0 停在 home 那几帧：
+# shoulder_pan 跨度 10.7°、wrist_flex 21.6°、elbow 6.0°、wrist_roll 6.4°），
+# 各台舵机零位标定各自不同，不存在一个能同时吻合所有源的 home。本值逐维都在区间内、
+# 靠中位，这也正是"仿真可以当作又一台真机"的依据。
 # 换成别的起始位形，策略从没见过的位姿起步，实测同一份权重成功率 0/20 → 9/10。
 #
 # ★ 臂关节与夹爪**不是同一个量纲**，所以分成两个常量：lerobot 的 `so_follower` 把
@@ -58,6 +62,29 @@ def gripper_limit_rad():
 #   混训时同一个物理状态在两份数据里是两个不同的数。
 REAL_HOME_ARM_DEG = [-5.76, -102.68, 92.97, 63.38, -0.53]
 REAL_HOME_GRIPPER_PCT = 1.90
+
+# 各关节的力矩上限（N·m）。臂五关节与夹爪**必须分开**。
+#
+# 真机遥操里人是把扳机**捏到底**的，抓紧靠物体把两指卡死 —— 真机夹爪 action 中位 1.98%、
+# state 中位 14.35%，那 12.4 点落差就是堵转。所以仿真收到"合到底"时也必须堵转。
+#
+# 夹爪取 2.0：实测扫描（`experiment_main_v1/scripts/EAI-exp-002/measure_squeeze.py`，
+# 抓着 40mm 刚体方块、悬空、下发 0%、走 40 步）——
+#     上限 10（URDF 声明的 effort）→ 合到 0.00%，方块被挤出 115mm
+#     上限  5 → 合到 0.00%，挤出 79mm
+#     上限  2 → 停在 23.38%，方块只挪 13.3mm　← 能堵转的最大档，且位移最小
+#     上限  1 / 0.5 / 0.2 → 停在 24.4 / 26.8 / 27.3%，挪 15.5 / 16.3 / 18.0mm
+# 2.0 同时对上真机舵机的量级：STS3215 堵转约 30 kg·cm ≈ 2.9 N·m。
+#
+# ★ 这个值决定仿真能不能当混训策略的评测环境：策略从真机数据学到的输出就是"捏到底"，
+#   若仿真收到它就把物体挤飞，那策略在仿真里永远抓不住 —— 仿真失去评测价值。
+#   此前统一写 100，是 URDF 声明的 10 倍，那不是舵机、是能把刚体挤穿的液压钳。
+#
+# 臂五关节保持 100：它们要举起整条臂加负载，实测按这个值能复现真机轨迹（同一串动作
+# 驱动，量回的关节角中位差 0.4~1.7°）。改小会让跟随变差，那是另一条账。
+ARM_FORCE_LIMIT = 100.0
+GRIPPER_FORCE_LIMIT = 2.0
+JOINT_FORCE_LIMITS = [ARM_FORCE_LIMIT] * 5 + [GRIPPER_FORCE_LIMIT]
 
 
 def kit_rest_qpos():
@@ -166,7 +193,7 @@ class SO101(BaseAgent):
             upper=None,
             stiffness=1e3,
             damping=1e2,
-            force_limit=100,
+            force_limit=JOINT_FORCE_LIMITS,
             normalize_action=False,
         )
 
@@ -177,7 +204,7 @@ class SO101(BaseAgent):
             [0.1, 0.1, 0.1, 0.1, 0.1, 0.2],
             stiffness=[1e3] * 6,
             damping=[1e2] * 6,
-            force_limit=100,
+            force_limit=JOINT_FORCE_LIMITS,
             use_delta=True,
             use_target=False,
         )
@@ -191,7 +218,7 @@ class SO101(BaseAgent):
             lower=[-1.0, -1.0, -1.0, -1.0, -1.0, -5.0],
             upper=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0],
             damping=[1e2] * 6,  
-            force_limit=100,
+            force_limit=JOINT_FORCE_LIMITS,
             friction=0,
             normalize_action=True
         )
