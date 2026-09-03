@@ -18,21 +18,20 @@
 
 import re
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import sapien
 import torch
 import trimesh
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils.registration import register_env
 from sapien.render import RenderBodyComponent, RenderMaterial, RenderShapeTriangleMesh
 from transforms3d.euler import euler2mat
 from transforms3d.quaternions import qmult, quat2mat
 
-from mani_skill.sensors.camera import CameraConfig
-from mani_skill.utils.registration import register_env
-
-from so101_sim.tasks.place import Place
-
 from so101_sim.robots.so101_kit_slow import ITEM_FRICTION_RANGE, SIM_FPS
+from so101_sim.tasks.place import Place
 
 # 真机 KIT 演示套件的物体 mesh（由讲义仓 `handbook/code/assets/objects/` 的 STEP
 # 用 `robots/convert_step.py` 转出，产物随包分发、STEP 原件不随包）。
@@ -94,6 +93,22 @@ TABLE_COLOR = (0.9, 0.9, 0.9, 1.0)
 # 一致。z 保持 0 是实测的结论而非省略：前送 30mm 只把那个上限从 0.980 抬到 0.986，后拉
 # 30mm 崩到 -0.014 ⇒ 缺的从来不是缩放。
 TOP_CAMERA_OFFSET = (-0.002, 0.027, 0.0)
+
+# 复位时对 top 相机位置额外采的抖动半幅（米，同一坐标约定）。
+#
+# 真机自己的视角就不是一个点：modelscope 那份数据集的 9 个任务目录里，底座安装板的位置
+# 实测分成至少 5 种装法 —— 其中 5 份与 `pick_up_a_cube` 逐像素相同（未平移相关 ≥0.9986），
+# `pick_up_a_can` 差 23 px 纵向（平移后相关 0.994，同一台机子挪过相机），另外 3 份差 100 px
+# 以上。⇒ 仿真不该把所有集都钉在同一个视角上，而应在真机那个域内抖动，让数据自带同量级的
+# 视角多样性。
+#
+# 取值 ±20 px（安装板深度上 885 px/m ⇒ 0.023 m）：它落在**混训要用的那一族**内侧
+# （族内实测跨度是纵向 23 px），也严格落在全域 `dx -117~+101 / dy -23~+120 px` 内侧。
+# 不取全域跨度，是因为域不是一团连续的云而是几处离散装法，按包围盒均匀撒会撒到没有任何
+# 真机数据的地方去。
+#
+# z 不抖：安装板的位移只给得出画面内的二维偏差，定不出沿光轴的量。没有实测支撑的旋钮不加。
+TOP_CAMERA_JITTER = (0.023, 0.023, 0.0)
 
 
 def _paint_actor(actor, rgba):
@@ -203,7 +218,7 @@ class KitDualCameraMixin:
     盒/柱 item 与料箱的**渲染网格**换成真机演示套件的 STEP→mesh（碰撞盒不动，抓取/reward 不变）。
     """
 
-    SUPPORTED_ROBOTS = ["so101", "so101_kit_slow"]
+    SUPPORTED_ROBOTS: ClassVar[list[str]] = ["so101", "so101_kit_slow"]
 
     # 子类可覆盖：把 item / bin 的视觉换成真机套件 mesh（None=沿用 squint 内置几何）。
     ITEM_MESH = None
@@ -293,6 +308,33 @@ class KitDualCameraMixin:
             ),
         ]
 
+    def _initialize_episode(self, env_idx, options: dict):
+        """复位时把 top 相机的位置在真机视角域内重采一次。
+
+        Args:
+            env_idx: 本次复位的 env 下标。
+            options: ManiSkill 传下来的复位选项。
+
+        随机数取自 ManiSkill 逐集按 seed 播种的 `_batched_episode_rng` ⇒ 同一个 seed 重跑，
+        视角一模一样，回放与跨后端复跑都可复现。
+
+        ★ 只在**所有** env 一起复位时重采，且抖动只取 0 号 env 那一路随机流。
+          ManiSkill 的 `RenderCamera.set_local_pose` 把同一个位姿写给所有子场景，
+          给不了逐 env 的视角；若只有部分 env 复位就重采，会把正在跑的那些 env 的视角
+          在集中途换掉。
+
+        只动位置，不动朝向：`_OPTICAL_CONV` 原样带回去。转相机会让投影 keystone、
+        不再与真机平行。
+        """
+        super()._initialize_episode(env_idx, options)
+        if len(env_idx) != self.num_envs:
+            return
+        rng = self._batched_episode_rng[0]
+        jitter = np.asarray(TOP_CAMERA_JITTER) * rng.uniform(-1.0, 1.0, size=3)
+        position = np.asarray(TOP_CAMERA_OFFSET) + jitter
+        self._sensors["top"].camera.set_local_pose(
+            sapien.Pose(p=position.tolist(), q=_OPTICAL_CONV))
+
 
 # 三个分发场景的物体：碰撞盒与视觉网格**同尺寸**，都钉到 STEP 实测真值，mesh 缩放恒为 1.0。
 # 尺寸的唯一真相源是 STEP→glb 的包围盒（`mesh_full_size`），不在代码里另抄一份数字。
@@ -361,7 +403,7 @@ class RealSizeItemMixin:
     都设成 STEP 真值即可——不改 vendored 任务逻辑，reward/success 判定原样沿用。
     """
 
-    ITEM_SIZE_CONFIG = {}
+    ITEM_SIZE_CONFIG: ClassVar[dict[str, tuple[float, float]]] = {}
 
     def __init__(self, *args, domain_randomization_config=None, **kwargs):
         """把 `ITEM_SIZE_CONFIG` 里的尺寸区间补进域随机化配置。
@@ -425,9 +467,9 @@ def _jaw_sample_points(urdf_path, link_name):
         return _JAW_VERTEX_CACHE[key]
 
     text = Path(urdf_path).read_text()
-    block = re.search(rf'<link name="{link_name}">(.*?)</link>', text, re.S)
+    block = re.search(rf'<link name="{link_name}">(.*?)</link>', text, re.DOTALL)
     chunks = []
-    for col in re.findall(r"<collision>(.*?)</collision>", block.group(1), re.S):
+    for col in re.findall(r"<collision>(.*?)</collision>", block.group(1), re.DOTALL):
         origin = re.search(r'<origin xyz="([^"]+)"(?:\s+rpy="([^"]+)")?', col)
         mesh_ref = re.search(r'<mesh filename="([^"]+)"', col)
         if not mesh_ref:
@@ -539,11 +581,12 @@ class FirmGraspRewardMixin:
         """
         reward = super().compute_dense_reward(obs, action, info)
 
+        # 只取这两项：`_pinch_facts` 还给「是否落在一对相对面」与「面内偏移」，
+        # 但 reward 用的是 gap 与到质心的归一化距离，另两项由 `evaluate()` 自己用。
         if "pinch_center_off" in info:
-            gap, opposite = info["jaw_gap"], info["is_pinch_opposite"]
-            edge_off, center_off = info["pinch_edge_off"], info["pinch_center_off"]
+            gap, center_off = info["jaw_gap"], info["pinch_center_off"]
         else:
-            gap, opposite, edge_off, center_off = self._pinch_facts()
+            gap, _, _, center_off = self._pinch_facts()
         # 贴合分：gap<=tol 满分，线性衰减到 tol+scale 归零
         grip_score = (1.0 - (gap - FIRM_GRASP_GAP_TOL) / FIRM_GRASP_GAP_SCALE).clamp(0.0, 1.0)
         # 必须再乘「方位」项，否则策略会去优化棱边接触：接触点离棱越远越高分。
@@ -815,7 +858,7 @@ class KitGeomSingleCamMixin(SlowRobotMixin):
     相机沿用父环境默认，故观测是 3 通道，与专家编码器匹配。
     """
 
-    SUPPORTED_ROBOTS = ["so101", "so101_kit_slow"]
+    SUPPORTED_ROBOTS: ClassVar[list[str]] = ["so101", "so101_kit_slow"]
     SLOW_ROBOT_UID = "so101_kit_slow"
 
 
