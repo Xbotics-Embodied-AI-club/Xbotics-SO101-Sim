@@ -18,6 +18,7 @@ from lerobot.robots import Robot
 from lerobot.types import RobotAction, RobotObservation
 
 from so101_sim.config_lerobot_robot import SO101SimRobotConfig
+from so101_sim.envs import CAMERA_HEIGHT, CAMERA_NAMES, CAMERA_WIDTH
 from so101_sim.lerobot_env import So101SimEnv
 from so101_sim.robots.so101_base.so101 import SO101
 
@@ -64,13 +65,18 @@ class SO101SimRobot(Robot):
 
     @property
     def observation_features(self) -> dict:
-        """六个关节位置 + 每路相机的画面形状。"""
-        feats: dict[str, Any] = {f"{name}.pos": float for name in JOINT_NAMES}
-        if self._env is not None:
-            shape = (self._env.observation_height, self._env.observation_width, 3)
-            for cam in self._env._camera_names:
-                feats[cam] = shape
-        return feats
+        """六个关节位置 + 每路相机的画面形状。
+
+        ★形状取自**声明的常量**（`envs.py` 的 `CAMERA_NAMES` / `CAMERA_WIDTH` /
+          `CAMERA_HEIGHT`），不从运行时环境读 —— `lerobot-record` 在 `connect()`
+          **之前**就用这个属性算数据集的 features（`lerobot_record.py:502-512`），
+          那时环境还没建。依赖运行时环境的写法会让录出来的数据集**没有图像特征**
+          （实测：只剩 action / observation.state 与索引列，两路相机整个丢掉，
+          全程不报错）。真机那侧 `so_follower._cameras_ft` 同样是从配置取形状。
+        """
+        shape = (CAMERA_HEIGHT, CAMERA_WIDTH, 3)
+        return {**{f"{name}.pos": float for name in JOINT_NAMES},
+                **{cam: shape for cam in CAMERA_NAMES}}
 
     @property
     def action_features(self) -> dict:
@@ -89,10 +95,8 @@ class SO101SimRobot(Robot):
         ★不能不实现：`lerobot_record.py:522` 用 `hasattr` 兜了底，但 548 行直接
         `len(robot.cameras)` 没兜 —— 少了它就是 `AttributeError`，而不是退化成 0。
         """
-        if self._env is None:
-            return {}
-        shape = (self._env.observation_height, self._env.observation_width, 3)
-        return {cam: shape for cam in self._env._camera_names}
+        shape = (CAMERA_HEIGHT, CAMERA_WIDTH, 3)
+        return {cam: shape for cam in CAMERA_NAMES}
 
     @property
     def is_connected(self) -> bool:

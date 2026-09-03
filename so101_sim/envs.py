@@ -48,6 +48,12 @@ _OPTICAL_CONV = list(qmult(_ROS_OPTICAL_TO_SAPIEN, _ROLL_180))
 # 相机分辨率对齐真机 task1（宽 640 × 高 480）。
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
+# 相机名。**不建环境就要知道**：`lerobot-record` 在 `robot.connect()` **之前**
+# 就用 `robot.observation_features` 算数据集的 features（`lerobot_record.py:502-512`），
+# 那时环境还没建。名字与分辨率若只能从运行时环境读，录出来的数据集就**没有图像特征**
+# —— 实测踩过：8 集只有 action / observation.state 与索引列，两路相机整个丢掉，
+# 而全程不报错。真机那侧（`so_follower._cameras_ft`）也是从**配置**取形状、不从硬件取。
+CAMERA_NAMES = ("top", "wrist")
 # 竖直 FOV（弧度）= ChArUco 棋盘格标定结果 fovy=59.17°（RMS 0.72px，233 帧，640×480）。
 # 标定视频/部署/task1 是同一路相机（同型号同镜头），故 top 与 wrist 共用此值。
 # CameraConfig.fov 即 SAPIEN fovy，标定值可直接用。
