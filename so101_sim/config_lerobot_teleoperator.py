@@ -26,14 +26,25 @@ from lerobot.teleoperators.config import TeleoperatorConfig
 @TeleoperatorConfig.register_subclass("so101_dataset_player")
 @dataclass(kw_only=True)
 class SO101DatasetPlayerConfig(TeleoperatorConfig):
-    """回放一份已录 LeRobotDataset 里某一集的动作。
+    """播一串**已经算好的**动作。来源两种，二选一。
 
     Attributes:
-        repo_id: 源数据集标识。
-        episode: 要回放的集号。
+        repo_id: 源数据集标识（回放已录数据集时给）。
+        episode: 要回放的集号（同上）。
         root: 源数据集根目录。不给则按 lerobot 的默认位置找。
+        actions_path: 一份 `.npy` 的路径（离线规划的轨迹时给）。形状 `(帧数, 6)`，
+            列序按 `lerobot_robot.JOINT_NAMES`，单位是真机口径（臂五关节度、
+            夹爪 0~100 行程百分比）。
+
+    ★ 两种来源**必须恰好给一个**。都给或都不给会在 `connect()` 抛错，而不是挑一个用 ——
+      "这批数据是从哪来的"必须由命令本身唯一确定。
+
+    为什么规划走文件而不是让遥操器自己算：`Teleoperator.get_action()` 不接受观测
+    （基类签名如此），看着物体现算的专家放不进这个接口。所以专家离线规划、落一份数组，
+    这里只负责按顺序播 —— 播的那一侧不做单位换算、不补维、不重排。
     """
 
-    repo_id: str
-    episode: int
+    repo_id: str | None = None
+    episode: int | None = None
     root: str | None = None
+    actions_path: str | None = None

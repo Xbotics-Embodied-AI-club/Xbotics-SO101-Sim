@@ -1,7 +1,11 @@
-"""回放型遥操器：把一份已录数据集里某一集的动作逐帧吐给 `lerobot-record`。
+"""播放型遥操器：把一串**已经算好的**动作逐帧吐给 `lerobot-record`。
 
-配置与登记见 `config_lerobot_teleoperator.py`。这里只做一件事：**按顺序把动作发出去**，
-不做单位换算、不补维、不重排 —— 那三件事任何一件放进来，仿真数据就又多了一个口径。
+动作来源二选一（见 `config_lerobot_teleoperator.py`）：一份已录数据集的某一集，
+或一份离线规划落盘的 `.npy`。后者是脚本化专家用的口子 —— `Teleoperator.get_action()`
+不接受观测，看着物体现算的专家放不进这个接口，所以专家离线规划、这里只负责播。
+
+这里只做一件事：**按顺序把动作发出去**，不做单位换算、不补维、不重排 ——
+那三件事任何一件放进来，仿真数据就又多了一个口径。
 
 ★ 关节顺序按**名字**取，不按列序。源数据集的 `action` 有 `names`，本包有 `JOINT_NAMES`，
   两者名字集合必须相同，否则直接报错。按列序取在名字顺序变了的时候不报错，只是把
@@ -46,14 +50,33 @@ class SO101DatasetPlayer(Teleoperator):
         return self._actions is not None
 
     def connect(self, calibrate: bool = True) -> None:
-        """把那一集的动作全部读进内存。
+        """把要播的动作全部读进内存 —— 来自已录数据集或一份规划好的 `.npy`。
 
         Args:
             calibrate: 基类接口要求，回放没有标定这回事，忽略。
 
         Raises:
-            ValueError: 源数据集的关节名与本包的对不上。
+            ValueError: 两种来源不是恰好给一个；或源数据集的关节名与本包的对不上；
+                或 `.npy` 的形状不是 `(帧数, 6)`。
         """
+        from_dataset = self.config.repo_id is not None
+        from_file = self.config.actions_path is not None
+        if from_dataset == from_file:
+            raise ValueError(
+                "`repo_id` 与 `actions_path` 必须恰好给一个 —— "
+                f"现在 repo_id={self.config.repo_id!r} actions_path={self.config.actions_path!r}。"
+                "两个都给就说不清这批数据从哪来。")
+        if from_file:
+            actions = np.load(self.config.actions_path)
+            want = len(JOINT_NAMES)
+            if actions.ndim != 2 or actions.shape[1] != want:
+                raise ValueError(
+                    f"{self.config.actions_path} 的形状是 {actions.shape}，"
+                    f"要的是 (帧数, {want})，列序按 JOINT_NAMES")
+            self._actions = np.asarray(actions, dtype=np.float64)
+            self._cursor = 0
+            return
+
         dataset = LeRobotDataset(self.config.repo_id, root=self.config.root,
                                  episodes=[self.config.episode])
         names = dataset.features["action"]["names"]
