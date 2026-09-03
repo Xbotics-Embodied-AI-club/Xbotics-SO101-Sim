@@ -35,10 +35,21 @@ class SO101SimRobot(Robot):
 
     config_class = SO101SimRobotConfig
     name = "so101_sim"
+    # ★写进数据集的 `robot_type` 必须是真机那个值。`Robot` 基类默认
+    #   `self.robot_type = self.name`，于是录出来是 `so101_sim`，而真机是
+    #   `so_follower` —— 而官方合并的 `validate_all_metadata` **逐字比 robot_type**，
+    #   不一致直接抛错，仿真与真机就合不了。
+    #
+    #   为什么该报真机的值而不是自己的名字：这台机器人的全部意义是「仿真扮演一台
+    #   SO-101」—— 关节名、单位、动作语义、帧率、分辨率、编码都与真机同源，下游
+    #   本来就不该分得出来。`name` 仍是 `so101_sim`（那是 `--robot.type` 的选择器，
+    #   属于命令行口径）；`robot_type` 是**数据口径**，两者不是一回事。
+    REAL_ROBOT_TYPE = "so_follower"
 
     def __init__(self, config: SO101SimRobotConfig):
         super().__init__(config)
         self.config = config
+        self.robot_type = self.REAL_ROBOT_TYPE
         self._env: So101SimEnv | None = None
         self._obs: dict[str, Any] | None = None
         self._frames: list[np.ndarray] = []
