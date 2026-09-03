@@ -86,6 +86,19 @@ ARM_FORCE_LIMIT = 100.0
 GRIPPER_FORCE_LIMIT = 2.0
 JOINT_FORCE_LIMITS = [ARM_FORCE_LIMIT] * 5 + [GRIPPER_FORCE_LIMIT]
 
+# 夹爪关节的库仑摩擦（N·m）。URDF 里这个关节**没有 `<dynamics>`**，摩擦与阻尼都是 0。
+#
+# 为什么必须补：捏到底时目标位在物理止点之外约 0.4 rad，PD 算出的力矩
+# （stiffness 1e3 × 0.4 = 400 N·m）远超 `GRIPPER_FORCE_LIMIT`，于是驱动**饱和**——
+# 而 PhysX 把驱动的阻尼项算在同一个被截断的和里面，速度反馈因此失去权限。爪子被一个恒定
+# 2 N·m 顶着，接触求解器的任何回弹都没人压制。目审逐帧读出来的就是这个：合拢后保持的
+# 12 帧里方块仍在转、仍在往爪腔里滑，右侧那块爪的台阶侧影逐帧变形（用户：「夹爪一直在抖」）。
+#
+# 关节摩擦是**独立于驱动的**库仑摩擦，不被 `force_limit` 截断，所以它正好补上这个洞 ——
+# 真机伺服堵转不嗡嗡响，靠的就是减速箱这一路摩擦。取驱动上限的 10%：足以耗散小幅振荡，
+# 又远不足以妨碍合拢（合拢本身用满 2 N·m）。
+GRIPPER_JOINT_FRICTION = 0.2
+
 
 def kit_rest_qpos():
     """起始位姿的弧度形式。
@@ -232,7 +245,7 @@ class SO101(BaseAgent):
         return deepcopy_dict(controller_configs)
 
     def _after_init(self):
-        """关掉几何自带的 4 对假自碰撞，见 `FALSE_SELF_COLLISION_PAIRS` 上方的账。"""
+        """关掉几何自带的 4 对假自碰撞，并给夹爪关节补上减速箱摩擦。"""
         super()._after_init()
         links = self.robot.links_map
         for k, (a, b) in enumerate(FALSE_SELF_COLLISION_PAIRS):
@@ -240,6 +253,7 @@ class SO101(BaseAgent):
             for name in (a, b):
                 if name in links:
                     links[name].set_collision_group_bit(group=2, bit_idx=bit, bit=1)
+        self.robot.active_joints_map["gripper"].set_friction(GRIPPER_JOINT_FRICTION)
 
     def _after_loading_articulation(self):
         super()._after_loading_articulation()
