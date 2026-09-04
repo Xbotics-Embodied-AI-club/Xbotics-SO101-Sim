@@ -227,22 +227,25 @@ class So101SimEnv(gym.Env):
         """把 ManiSkill 的弧度换成对外口径（臂关节→度，夹爪→行程百分比）。"""
         if self.unit_convention != "real":
             return x
+        from so101_sim.robots.so101_base.so101 import grip_pct_from_rad
+
         out = np.rad2deg(np.asarray(x, dtype=np.float32))
-        span = self._gripper_rad_hi - self._gripper_rad_lo
-        pct = (np.asarray(x, dtype=np.float32)[..., self._gripper_index]
-               - self._gripper_rad_lo) / span * 100.0
-        out[..., self._gripper_index] = pct
+        # 夹爪的百分比标度**标定到真机**，见 `so101.grip_pct_from_rad`：
+        # URDF 区间给的是"仿真自己的 0~100"，与真机 follower 的 0~100 不是同一把尺子
+        # （同一个 40mm 方块真机读 16.0%、仿真原始读 28.6%）。
+        out[..., self._gripper_index] = grip_pct_from_rad(
+            np.asarray(x, dtype=np.float32)[..., self._gripper_index])
         return out.astype(np.float32)
 
     def _to_sim(self, x: np.ndarray) -> np.ndarray:
         """把对外口径换回 ManiSkill 的弧度（`_from_sim` 的逆）。"""
         if self.unit_convention != "real":
             return x
+        from so101_sim.robots.so101_base.so101 import grip_rad_from_pct
+
         out = np.deg2rad(np.asarray(x, dtype=np.float32))
-        span = self._gripper_rad_hi - self._gripper_rad_lo
-        rad = (np.asarray(x, dtype=np.float32)[..., self._gripper_index] / 100.0 * span
-               + self._gripper_rad_lo)
-        out[..., self._gripper_index] = rad
+        out[..., self._gripper_index] = grip_rad_from_pct(
+            np.asarray(x, dtype=np.float32)[..., self._gripper_index])
         return out.astype(np.float32)
 
     def _format_raw_obs(self, raw_obs: dict) -> dict:

@@ -48,6 +48,43 @@ def gripper_limit_rad():
     raise ValueError(f"{_URDF_PATH} 里读不到 gripper 关节的限位")
 
 
+# 夹爪 0~100 行程百分比的**标度，标定到真机**。两个锚点，一条仿射。
+#
+# URDF 的关节区间只定义了"仿真自己的 0~100"，它与真机 follower 那一路的 0~100
+# **不是同一把尺子**：真机的百分比由舵机标定时的两个端点定义，跨度 1477 个计数
+# （≈129.8° 电机行程），仿真是 URDF 的 110°；而且从电机角到爪口开度是连杆关系，
+# 不是线性，所以推不出来，只能按可观测量标定。
+#
+# 锚点（都取自可比的物理状态）：
+#   · 空爪合到底：真机 `pick_up_a_cube` 保持段 state 中位 **1.896%**；仿真 **0.000%**
+#   · 夹住 40mm 方块：真机搬运段 state 中位 **16.012%**；仿真 **28.560%**
+# ⇒ 仿真原始百分比是真机的 2.02 倍、零点低 1.9 点。不标定的话，同一个物理姿态
+#   在两份数据里读数差一倍 —— 混训时策略在这一路上学不到一致的映射。
+#
+# 校验：仿真全张（原始 100%）映到 51.3%，落在真机 state 上限 64.25 之内，不会撞顶。
+_GRIP_ANCHOR_SIM = (0.0, 28.560)      # 仿真原始百分比
+_GRIP_ANCHOR_REAL = (1.896, 16.012)   # 真机口径百分比
+_GRIP_SCALE = ((_GRIP_ANCHOR_REAL[1] - _GRIP_ANCHOR_REAL[0])
+               / (_GRIP_ANCHOR_SIM[1] - _GRIP_ANCHOR_SIM[0]))
+_GRIP_OFFSET = _GRIP_ANCHOR_REAL[0]
+
+
+def grip_pct_from_rad(rad):
+    """夹爪关节角（弧度）→ **真机口径**的行程百分比。"""
+    lo, hi = gripper_limit_rad()
+    return _GRIP_OFFSET + _GRIP_SCALE * (rad - lo) / (hi - lo) * 100.0
+
+
+def grip_rad_from_pct(pct):
+    """**真机口径**的行程百分比 → 夹爪关节角（弧度）。
+
+    低于空爪锚点的指令会解出小于关节下限的目标位 —— 那正是"捏到底"：
+    目标压在物理止点之外，靠物体把两指卡死。
+    """
+    lo, hi = gripper_limit_rad()
+    return lo + (pct - _GRIP_OFFSET) / _GRIP_SCALE / 100.0 * (hi - lo)
+
+
 # 真机开机位姿。判据是**落在真机各源的 home 区间内且靠近中位**，不是"与某一份逐维吻合"
 # —— modelscope 那 9 份真机数据集的 home 彼此就差很多（实测各源 ep0 停在 home 那几帧：
 # shoulder_pan 跨度 10.7°、wrist_flex 21.6°、elbow 6.0°、wrist_roll 6.4°），
@@ -130,11 +167,11 @@ def kit_rest_qpos():
     """起始位姿的弧度形式。
 
     Returns:
-        六个关节角（弧度）：前五维由度换算，夹爪由行程百分比按 URDF 限位换算。
+        六个关节角（弧度）：前五维由度换算，夹爪由**真机口径**的行程百分比换算
+        （见 `grip_rad_from_pct`：那把尺子标定到真机，不是 URDF 区间）。
     """
-    lo, hi = gripper_limit_rad()
     return np.radians(REAL_HOME_ARM_DEG).tolist() + [
-        lo + REAL_HOME_GRIPPER_PCT / 100.0 * (hi - lo)
+        grip_rad_from_pct(REAL_HOME_GRIPPER_PCT)
     ]
 
 
