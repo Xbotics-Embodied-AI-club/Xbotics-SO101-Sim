@@ -33,6 +33,18 @@ CONTROL_MODE = "pd_joint_pos"
 # 夹爪读数跟随指令的一阶惯性系数。等效滞后 a/(1−a) = 4 帧，与真机实测的最优滞后相同。
 GRIPPER_READING_ALPHA = 0.8
 
+# 舵机编码器的一个计数（度）。STS3215 是 12 位绝对编码器 ⇒ 360/4096。
+#
+# **真机的关节读数落在这个栅格上，仿真的必须也落在上面。** 实测
+# `pick_up_a_cube` 300 集：`min|Δ| = 0.087906°`，非零逐帧差的 99.90~100.0% 是它的整数倍；
+# 而未量化的仿真 `min|Δ|` 只有 7.5e-05°。一行 `np.diff(state)/0.087891` 就能把两份
+# 数据分开 —— 这是「看得出不是真机录的」里最直接的一条。
+#
+# 量化还顺带补上另一条痕迹：真机的 state 会**停住**（相邻帧完全相等的比例 37.4~76.6%，
+# 最长同值段中位 42~72 帧，每集末尾 10 帧标准差精确为 0），因为动得比一个计数慢时
+# 读数不变。未量化的仿真永远在漂（相邻帧相等 0.0~1.2%，最长同值段 1 帧）。
+ENCODER_STEP_DEG = 360.0 / 4096.0
+
 
 class SO101SimRobot(Robot):
     """一台由仿真扮演的 SO-101，`get_observation` / `send_action` 与真机同形。"""
@@ -178,6 +190,10 @@ class SO101SimRobot(Robot):
         #   与真机逐通道互相关测出的最优滞后（夹爪 4 帧）一致。
         if self._grip_reading is not None:
             pos[len(JOINT_NAMES) - 1] = self._grip_reading
+        # 落到编码器栅格上，臂五关节按度、夹爪按它占满行程的比例（同一个计数换算）。
+        pos[:5] = np.round(pos[:5] / ENCODER_STEP_DEG) * ENCODER_STEP_DEG
+        grip_step = 100.0 * ENCODER_STEP_DEG / self._gripper_span_deg()
+        pos[5] = np.round(pos[5] / grip_step) * grip_step
         obs: dict[str, Any] = {
             f"{name}.pos": float(pos[i]) for i, name in enumerate(JOINT_NAMES)
         }
@@ -187,6 +203,13 @@ class SO101SimRobot(Robot):
         if self.config.state_log_path:
             self._states.append(pos.astype(np.float32))
         return obs
+
+    def _gripper_span_deg(self) -> float:
+        """夹爪关节的满行程（度）—— 从 URDF 现读，不在这里抄一份数。"""
+        from so101_sim.robots.so101_base.so101 import gripper_limit_rad
+
+        low, high = gripper_limit_rad()
+        return float(np.degrees(high - low))
 
     def send_action(self, action: RobotAction) -> RobotAction:
         """把一帧绝对关节位置目标发下去，走一步仿真。
