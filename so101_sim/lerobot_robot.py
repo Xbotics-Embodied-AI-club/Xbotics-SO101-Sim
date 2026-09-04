@@ -30,6 +30,9 @@ JOINT_NAMES = tuple(SO101.arm_joint_names) + tuple(SO101.gripper_joint_names)
 # 朝错误方向走 —— 表现成一个会被误读成「策略没学会」的低成功率。
 CONTROL_MODE = "pd_joint_pos"
 
+# 夹爪读数跟随指令的一阶惯性系数。等效滞后 a/(1−a) = 4 帧，与真机实测的最优滞后相同。
+GRIPPER_READING_ALPHA = 0.8
+
 
 class SO101SimRobot(Robot):
     """一台由仿真扮演的 SO-101，`get_observation` / `send_action` 与真机同形。"""
@@ -63,7 +66,7 @@ class SO101SimRobot(Robot):
         # `is_robot_static` / `robot_touching_item` / `robot_touching_bin` …）。
         self._criteria: dict[str, list[float]] = {}
         # 上一帧下发的夹爪指令 —— `get_observation` 报的就是它，见那里的说明。
-        self._last_grip_cmd: float | None = None
+        self._grip_reading: float | None = None
 
     @property
     def observation_features(self) -> dict:
@@ -129,8 +132,8 @@ class SO101SimRobot(Robot):
         self._states = []
         self._success = []
         self._criteria = {}
-        # 新的一集，上一集的夹爪指令不能带过来 —— 带过来的话首帧会报上一集末尾的开度。
-        self._last_grip_cmd = None
+        # 新的一集，上一集的夹爪读数不能带过来。
+        self._grip_reading = None
 
     @property
     def is_calibrated(self) -> bool:
@@ -158,25 +161,23 @@ class SO101SimRobot(Robot):
         if self._env is None or self._obs is None:
             raise RuntimeError("还没 connect，没有观测可取")
         pos = np.asarray(self._obs["agent_pos"], dtype=np.float64).reshape(-1)
-        # 夹爪那一路报**上一帧的指令**，不报爪口的真实开度 —— 真机的传感器就是这样的。
+        # 夹爪那一路报的是**指令经过一阶惯性之后的读数**，不是爪口的真实开度 ——
+        # 真机的传感器就是这样的。
         #
         # 实测 `pick_up_a_cube` 300 集：搬运段（中位 96 帧、爪里夹着 40mm 方块）
-        # 真机 action 中位 1.19%、state 中位 **1.90%**，落差只有 +0.64 点；
-        # 而这份数据集里 state 的**全局最小值是 1.22%** —— "夹着一个 40mm 方块"
-        # 与"空爪合到底"在真机那一路上只差 0.68 点。⇒ 真机的 `gripper.pos` 根本不携带
-        # 爪口宽度的信息，它是指令回显：纯回显的残差中位 0.77、p95 15.5，
-        # 而 p95 恰好就是一帧的最大变化量（夹爪逐帧最大 10.87%/帧）量级 ⇒
-        # 差的那一点是**采样时刻的错位**，不是物理开度。
+        # action 中位 1.19%、state 中位 **1.90%**，落差只有 +0.64 点；而这份数据集里
+        # state 的**全局最小值是 1.22%** —— "夹着一个 40mm 方块"与"空爪合到底"在真机
+        # 那一路上只差 0.68 点。⇒ 真机的 `gripper.pos` 不携带爪口宽度的信息。
+        # 仿真原本报关节真值，同一段读 28.56%（方块把两指撑开），同一任务阶段差 26 点。
         #
-        # 仿真原本报的是关节真值，同一段读 **28.56%**（方块把两指撑开）。同一个任务阶段
-        # 两份数据差 26 点，是当时最大的一处不对齐：策略在最长的那一段（搬运）上，
-        # 看到的仿真输入永远落在真机分布之外。
-        #
-        # 录制循环是 `get_observation` → `send_action`，所以此刻报上一帧的指令
-        # 正好是一帧滞后（实测真机残差中位 0.766 / p95 14.9，与真机自己的口径同量级）。
-        # 首帧还没有指令，报真值 —— 那时两指张开着，真值与指令本来就一致。
-        if self._last_grip_cmd is not None:
-            pos[len(JOINT_NAMES) - 1] = self._last_grip_cmd
+        # ★ **不能直接回显指令。** 那样 `state[n] == action[n-1]` 会逐位精确成立
+        #   （实测 3018/3018 帧、max|diff| = 0.0），而真机 0/8548 帧成立 —— 那是个
+        #   策略能直接利用的捷径特征，也是一眼能看出"这不是真机录的"的破绽。
+        # ★ 取一阶惯性 a=0.8：对真机逐帧拟合时它是同族里最好的（残差中位 0.703，
+        #   优于纯回显 0.773、优于任何整数帧滞后），而 a/(1−a) = 4 帧的等效滞后
+        #   与真机逐通道互相关测出的最优滞后（夹爪 4 帧）一致。
+        if self._grip_reading is not None:
+            pos[len(JOINT_NAMES) - 1] = self._grip_reading
         obs: dict[str, Any] = {
             f"{name}.pos": float(pos[i]) for i, name in enumerate(JOINT_NAMES)
         }
@@ -206,7 +207,12 @@ class SO101SimRobot(Robot):
         if missing:
             raise KeyError(f"动作里缺这些关节：{missing}；收到的键是 {sorted(action)}")
         vec = np.array([float(action[f"{n}.pos"]) for n in JOINT_NAMES], dtype=np.float32)
-        self._last_grip_cmd = float(vec[-1])
+        # 夹爪读数按一阶惯性跟随指令，系数见 `get_observation` 的说明。
+        cmd = float(vec[-1])
+        prev = self._grip_reading
+        if prev is None:
+            prev = float(np.asarray(self._obs["agent_pos"]).reshape(-1)[-1])
+        self._grip_reading = GRIPPER_READING_ALPHA * prev + (1.0 - GRIPPER_READING_ALPHA) * cmd
         self._obs, _, _, _, info = self._env.step(vec)
         if self.config.state_log_path:
             self._success.append(bool(info.get("is_success", False)))
