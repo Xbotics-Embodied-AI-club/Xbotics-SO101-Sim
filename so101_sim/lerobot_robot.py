@@ -85,7 +85,6 @@ class SO101SimRobot(Robot):
         # 逐项判据，键名就是环境 `evaluate()` 给的那些（`is_item_above_bin` /
         # `is_robot_static` / `robot_touching_item` / `robot_touching_bin` …）。
         self._criteria: dict[str, list[float]] = {}
-        # 上一帧下发的夹爪指令 —— `get_observation` 报的就是它，见那里的说明。
 
     @property
     def observation_features(self) -> dict:
