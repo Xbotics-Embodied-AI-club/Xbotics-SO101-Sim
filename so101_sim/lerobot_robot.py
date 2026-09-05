@@ -47,44 +47,32 @@ CONTROL_MODE = "pd_joint_pos"
 # 收到 0.002 才分开（57.6% vs 100.0%）。
 ENCODER_STEP_DEG = 360.0 / 4095.0
 
-# 夹爪那一路的量子**不能用臂的计数换算**：leader 与 follower 各有各的标定跨度，
-# 而且逐任务不同。`observation.state` 来自 follower，所以这里取 follower 那一侧。
-#
-# ★ 编码器格点还带**相位**：真机取值落在 `(k + 相位)·step` 上，相位逐关节取 0 或 0.5
-#   （半格来自 lerobot 取中点与各舵机 homing offset 的交互）。实测每个通道的归属占比
-#   都是 100%，没有含糊的。**不对齐相位就留下一行判别器**：
-#   `abs(v/step - round(v/step)).max()` 对整数格约 0、对半格约 0.5 ——
-#   一行就能把仿真从真机里挑出来，而这正是当初加量化要消除的东西。
-#
-# ★ **逐环境分，不是一张全局常量。** 早先这里硬写 `100/1477`（cube 的 follower），
-#   理由是"cube 是主对标任务"—— 但 Cylinder40 对标的是 can，它的 follower 跨度是
-#   1519，差 2.84%。action 那一侧一直是按任务查表的（`recipe.GRIP_STEP_PCT`），
-#   state 这一侧漏了。
-#
-# ★ **can 那台机只算 ep<200。** 真机 can 数据集里 ep>=200 是另一台（夹爪跨度 1260/1477，
-#   与 cube 那台一致；ep<200 是 1268/1519），相位也不同。所有 can 口径都按 ep0-199 那台取。
-#
-# 这张表放在本包而不是产线的 `recipe.py`：三个环境 id 是本包注册的，依赖方向是
-# 产线 import 本包。放这边才只有一份，产线那边引用它即可。
-# `action` 那一路的量子与相位也放这里 —— 产线（`recipe.py`）引用本表，不另抄一份。
-# 一件事只有一个写点：两处各写一份，改一处忘一处只是时间问题。
-REAL_CALIBRATION = {
-    "SO101PickPlaceCube40-v1": {
-        "gripper_step_pct": {"state": 100.0 / 1477.0, "action": 100.0 / 1260.0},
-        "phase": {"state": (0.0, 0.0, 0.5, 0.5, 0.5),
-                  "action": (0.5, 0.5, 0.0, 0.0, 0.5)},
-    },
-    "SO101PickPlaceCube20-v1": {
-        "gripper_step_pct": {"state": 100.0 / 1477.0, "action": 100.0 / 1260.0},
-        "phase": {"state": (0.0, 0.0, 0.5, 0.5, 0.5),
-                  "action": (0.5, 0.5, 0.0, 0.0, 0.5)},
-    },
-    "SO101PickPlaceCylinder40-v1": {
-        "gripper_step_pct": {"state": 100.0 / 1519.0, "action": 100.0 / 1268.0},
-        "phase": {"state": (0.5, 0.5, 0.5, 0.0, 0.5),
-                  "action": (0.5, 0.5, 0.5, 0.0, 0.5)},
-    },
-}
+def gripper_step_pct():
+    """夹爪那一路的编码器量子（行程百分点/格），**从本机 URDF 现算**。
+
+    Returns:
+        一个计数占满行程的百分比。
+
+    夹爪的 0~100 是按 URDF 行程定义的（`so101.gripper_limit_rad`），而同一根轴上
+    也是那颗 12 位舵机，所以量子 = 100 ÷（行程占满量程的格数）：
+    URDF 行程 110.00° ⇒ 110/360×4095 = 1251.3 格 ⇒ 0.079920 %/格。
+
+    ★ **这是一个数，不是一张按任务查的表。** 曾按场景查表（cube 用 100/1477、
+      cylinder 用 100/1519，抄各自对标真机那一台）—— 那等于说同一台机器夹不同
+      物体时物理标定会变，而且每加一个任务就要加一行。标定是**机器**的属性，
+      不是任务的属性。
+
+    ★ **也不该抄某一台真机的跨度。** 夹爪百分比是标定相对量：真机各台自己就不一样
+      （主臂侧 1260 / 1268 / 1279，彼此差 1.5%），仿真这台 1251 落在这个散布里
+      （离最近的一台 0.7%）。仿真是「又一台机器」，用自己的尺子才自洽 ——
+      改抄真机尺子那次已被高尔夫球证伪（刚体标准件 42.67mm 被预测成 53.7mm）。
+
+    ★ 现读不写死：URDF 换了这里跟着变，与 `so101.gripper_limit_rad` 同一条规矩。
+    """
+    from so101_sim.robots.so101_base.so101 import gripper_limit_rad
+
+    low, high = gripper_limit_rad()
+    return 100.0 / (np.degrees(high - low) / ENCODER_STEP_DEG)
 
 
 class SO101SimRobot(Robot):
@@ -222,10 +210,14 @@ class SO101SimRobot(Robot):
         #   滤波回显产生不了这个，那就是堵转，state 报的是被物体撑开的那个开度。
         # 落到编码器栅格上：臂五关节按度、带该机的格点相位；夹爪按它占满行程的比例。
         # 两者都逐环境查 `REAL_CALIBRATION` —— 不同对标机的标定跨度与相位都不一样。
-        cal = REAL_CALIBRATION[self.config.task]
-        phase = np.asarray(cal["phase"]["state"], dtype=np.float64)
-        pos[:5] = (np.round(pos[:5] / ENCODER_STEP_DEG - phase) + phase) * ENCODER_STEP_DEG
-        grip_step = cal["gripper_step_pct"]["state"]
+        # 落到编码器栅格上：臂五关节按度，夹爪按它自己的行程换算出的量子。
+        # 量化本身是真机每台都有的物理事实（12 位编码器），所以两边都要有；
+        # 而**格点的相位不必对齐**：`_normalize` 里 `mid = (min_+max_)/2`，
+        # 端点和为奇数时 mid 落在半格上、为偶数时落在整格上 —— 那是每台机标定
+        # 端点的奇偶，没有物理含义，实测三台真机的相位各不相同。仿真是又一台机，
+        # 它的 mid 是整数，相位 0 就是它自己的合法标定。
+        pos[:5] = np.round(pos[:5] / ENCODER_STEP_DEG) * ENCODER_STEP_DEG
+        grip_step = gripper_step_pct()
         pos[5] = np.round(pos[5] / grip_step) * grip_step
         obs: dict[str, Any] = {
             f"{name}.pos": float(pos[i]) for i, name in enumerate(JOINT_NAMES)
