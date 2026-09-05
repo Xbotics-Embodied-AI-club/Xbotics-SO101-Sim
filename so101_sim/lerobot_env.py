@@ -14,7 +14,7 @@ batch 维处理，`num_envs=1` 时对首维取 `[0]`，于是 lerobot 的评测�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -31,6 +31,23 @@ def _to_numpy(x: Any) -> np.ndarray:
     return np.asarray(x)
 
 
+# 每个场景的**自然语言指令**，也就是喂给 VLA 的那句话。
+#
+# ★ 它必须与数据集 `meta/tasks.parquet` 里那条**逐字相同**。策略是按这句话区分该做什么的：
+#   本项目三个场景的指令两两不同，语言是唯一的区分量，差一个字就是另一个任务。
+#
+# ★ **这里是唯一声明处。** 环境 id 由本包注册，指令是这个任务的一部分，所以跟着环境走；
+#   产线的 `recipe.task_text` 引用本表，不另抄一份。抄两份的下场是录数据用一句、
+#   评测用另一句，而两边都不报错。
+#
+# ★ 别拿环境 id 当指令。`SO101PickPlaceCube40-v1` 不是人话，训练里从没出现过这个字符串。
+TASK_INSTRUCTION = {
+    "SO101PickPlaceCube40-v1": "Pick up a cube and place in the bin",
+    "SO101PickPlaceCube20-v1": "Pick up a small cube and place in the bin",
+    "SO101PickPlaceCylinder40-v1": "Pick up a can and place in the bin",
+}
+
+
 class So101SimEnv(gym.Env):
     """一个 SO-101 抓放场景的单环境视图，观测按 lerobot 评测约定给出。
 
@@ -43,11 +60,12 @@ class So101SimEnv(gym.Env):
         unit_convention: 状态与动作对外的口径，`"real"`（真机口径）或 `"maniskill"`（原生弧度）。
     """
 
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    metadata: ClassVar[dict] = {"render_modes": ["rgb_array"], "render_fps": 30}
 
     def __init__(
         self,
         task: str = "SO101PickPlaceCube40-v1",
+        task_description: str | None = None,
         obs_type: str = "pixels_agent_pos",
         obs_mode: str = "rgb",
         render_mode: str = "rgb_array",
@@ -126,6 +144,19 @@ class So101SimEnv(gym.Env):
         """
         super().__init__()
         self.task = task
+        # 评测时喂给策略的那句话。lerobot 的 `add_envs_task` 优先取 `task_description`，
+        # 取不到就塞空串 —— 而空串意味着**评测把语言条件整个抹掉**，策略在训练里从没见过。
+        # 不给就按环境 id 查表；查不到直接报错，不退化成环境 id、更不退化成空串：
+        # 那两种退化都不报错，只表现为一个会被误读成「策略没学会」的低成功率。
+        if task_description is None:
+            if task not in TASK_INSTRUCTION:
+                raise ValueError(
+                    f"{task!r} 没有登记自然语言指令。评测要喂给 VLA 的是人话，不是环境 id ——"
+                    f" 请在 `TASK_INSTRUCTION` 里补上它（取值必须与数据集 tasks.parquet 逐字相同），"
+                    f" 或显式传 `task_description=`。已登记：{sorted(TASK_INSTRUCTION)}"
+                )
+            task_description = TASK_INSTRUCTION[task]
+        self.task_description = task_description
         self.obs_type = obs_type
         self.render_mode = render_mode
         self.num_envs = num_envs
